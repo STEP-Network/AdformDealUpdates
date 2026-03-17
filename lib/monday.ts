@@ -86,6 +86,51 @@ function getTextValue(item: any, columnId: string): string {
   return col?.text || col?.value?.replace(/"/g, "") || "";
 }
 
+// ── Helper: chunk array into batches of N (Monday limit = 100) ──
+function chunk<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
+const MONDAY_BATCH_SIZE = 100;
+
+// ── Helper: fetch items in batches, return all items flat ──
+async function batchFetchItems(
+  ids: string[],
+  columnIds: string[]
+): Promise<any[]> {
+  if (ids.length === 0) return [];
+
+  const batches = chunk(ids, MONDAY_BATCH_SIZE);
+  const colFilter = columnIds.map((c) => `"${c}"`).join(", ");
+
+  const results = await Promise.all(
+    batches.map((batchIds) =>
+      mondayQuery(`
+        query ($ids: [ID!]!) {
+          items(ids: $ids) {
+            id
+            name
+            column_values(ids: [${colFilter}]) {
+              id
+              text
+              value
+              ... on BoardRelationValue {
+                linked_item_ids
+              }
+            }
+          }
+        }
+      `, { ids: batchIds })
+    )
+  );
+
+  return results.flatMap((data) => data.items || []);
+}
+
 // ── Step 1: Get publisher's linked deal IDs and ad unit IDs in ONE query ──
 export async function getPublisherLinks(publisherId: string): Promise<{
   dealIds: string[];
@@ -121,26 +166,9 @@ export async function getPublisherLinks(publisherId: string): Promise<{
 
 // ── Step 2: Batch fetch all deals with their details + formats ──
 export async function getDeals(dealIds: string[]): Promise<Deal[]> {
-  if (dealIds.length === 0) return [];
+  const items = await batchFetchItems(dealIds, [COL_DEAL_ADFORM_ID, COL_DEAL_FORMATS]);
 
-  const data = await mondayQuery(`
-    query ($ids: [ID!]!) {
-      items(ids: $ids) {
-        id
-        name
-        column_values(ids: ["${COL_DEAL_ADFORM_ID}", "${COL_DEAL_FORMATS}"]) {
-          id
-          text
-          value
-          ... on BoardRelationValue {
-            linked_item_ids
-          }
-        }
-      }
-    }
-  `, { ids: dealIds });
-
-  return (data.items || []).map((item: any) => ({
+  return items.map((item: any) => ({
     mondayId: String(item.id),
     name: item.name,
     adformDealId: getTextValue(item, COL_DEAL_ADFORM_ID),
@@ -156,27 +184,16 @@ export async function getAdUnits(adUnitIds: string[]): Promise<{
 }> {
   if (adUnitIds.length === 0) return { adUnits: [], csIds: [], adUnitCsLinks: new Map() };
 
-  const data = await mondayQuery(`
-    query ($ids: [ID!]!) {
-      items(ids: $ids) {
-        id
-        name
-        column_values(ids: ["${COL_ADUNIT_ADFORM_PLACEMENT_ID}", "${COL_ADUNIT_FORMATS}", "${COL_ADUNIT_CREATIVE_SETTINGS}"]) {
-          id
-          text
-          value
-          ... on BoardRelationValue {
-            linked_item_ids
-          }
-        }
-      }
-    }
-  `, { ids: adUnitIds });
+  const items = await batchFetchItems(adUnitIds, [
+    COL_ADUNIT_ADFORM_PLACEMENT_ID,
+    COL_ADUNIT_FORMATS,
+    COL_ADUNIT_CREATIVE_SETTINGS,
+  ]);
 
   const allCsIds = new Set<string>();
   const adUnitCsLinks = new Map<string, string[]>();
 
-  const adUnits: AdUnit[] = (data.items || []).map((item: any) => {
+  const adUnits: AdUnit[] = items.map((item: any) => {
     const csIds = getLinkedIds(item, COL_ADUNIT_CREATIVE_SETTINGS);
     csIds.forEach((id) => allCsIds.add(id));
     adUnitCsLinks.set(String(item.id), csIds);
@@ -197,25 +214,10 @@ export async function getAdUnits(adUnitIds: string[]): Promise<{
 export async function getCreativeSettings(csIds: string[]): Promise<Map<string, CreativeSetting>> {
   if (csIds.length === 0) return new Map();
 
-  const data = await mondayQuery(`
-    query ($ids: [ID!]!) {
-      items(ids: $ids) {
-        id
-        name
-        column_values(ids: ["${COL_CS_ADFORM_ID}", "${COL_CS_FORMAT}"]) {
-          id
-          text
-          value
-          ... on BoardRelationValue {
-            linked_item_ids
-          }
-        }
-      }
-    }
-  `, { ids: csIds });
+  const items = await batchFetchItems(csIds, [COL_CS_ADFORM_ID, COL_CS_FORMAT]);
 
   const map = new Map<string, CreativeSetting>();
-  for (const item of data.items || []) {
+  for (const item of items) {
     map.set(String(item.id), {
       mondayId: String(item.id),
       name: item.name,
