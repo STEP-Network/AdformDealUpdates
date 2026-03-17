@@ -77,6 +77,14 @@ export interface AdformPlacementDetail {
 
 // ── Sync result types ──
 
+export interface PlacementDetail {
+  placementId: number;
+  adUnitName: string;
+  creativeSettings: number[];
+  action: "added" | "kept" | "skipped";
+  skipReason?: string;
+}
+
 export interface DealSyncResult {
   dealName: string;
   adformDealId: string;
@@ -85,6 +93,12 @@ export interface DealSyncResult {
   placementsSkipped: number; // empty CS after intersection
   status: "updated" | "dryRun" | "error";
   error?: string;
+  // Verbose fields (only when verbose=true)
+  verbose?: {
+    existingDeal: any;            // Full GET response from Adform
+    updatedDeal: any;             // Full PUT body we would send
+    placementBreakdown: PlacementDetail[];
+  };
 }
 
 export interface SyncResult {

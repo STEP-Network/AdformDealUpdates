@@ -9,7 +9,7 @@ import {
 } from "../lib/monday";
 import { authenticate, getDeal, getPlacement, updateDeal } from "../lib/adform";
 import { matchDealsToAdUnits, intersectCreativeSettings } from "../lib/matcher";
-import type { DealSyncResult, SyncResult, AdformDeal, DealWithPlacements } from "../lib/types";
+import type { DealSyncResult, SyncResult, AdformDeal, DealWithPlacements, PlacementDetail } from "../lib/types";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
@@ -22,11 +22,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let publisherId: string | undefined;
     let dryRun = false;
     let maxDeals: number | null = null;
+    let verbose = false;
 
     if (req.method === "GET") {
-      // Test mode: GET /api/sync?publisherId=123&maxDeals=1&dryRun=true
+      // Test mode: GET /api/sync?publisherId=123&maxDeals=1&dryRun=true&verbose=true
       publisherId = req.query.publisherId as string;
       dryRun = req.query.dryRun === "true";
+      verbose = req.query.verbose === "true";
       maxDeals = req.query.maxDeals ? parseInt(req.query.maxDeals as string, 10) : null;
     } else if (req.method === "POST") {
       // Monday webhook: POST with event payload
@@ -39,6 +41,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Allow overrides via query params even on POST
       if (req.query.dryRun === "true") dryRun = true;
+      if (req.query.verbose === "true") verbose = true;
       if (req.query.maxDeals) maxDeals = parseInt(req.query.maxDeals as string, 10);
     }
 
@@ -105,7 +108,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Process deals in parallel
     const dealPromises = dealsWithPlacements.map((dealMatch) =>
-      processDeal(token, dealMatch, dryRun)
+      processDeal(token, dealMatch, dryRun, verbose)
     );
     const results = await Promise.allSettled(dealPromises);
 
@@ -171,7 +174,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 async function processDeal(
   token: string,
   dealMatch: DealWithPlacements,
-  dryRun: boolean
+  dryRun: boolean,
+  verbose: boolean
 ): Promise<DealSyncResult> {
   const { adformDealId, matchedPlacements } = dealMatch;
 
@@ -206,6 +210,7 @@ async function processDeal(
 
   // Step 3: Intersect CS — only keep Monday CS IDs that exist in Adform placement
   const newPlacements: { id: number; creativeSettings: number[] }[] = [];
+  const placementBreakdown: PlacementDetail[] = [];
   let skippedCount = 0;
 
   for (const { mp, detail } of placementDetails) {
@@ -216,9 +221,17 @@ async function processDeal(
     const intersected = intersectCreativeSettings(mp.mondayCsIds, adformCsIds);
 
     if (intersected.length === 0) {
-      // Skip placements with no valid CS after intersection (matches Make.com module 55 filter)
       console.log(`[Sync] Skipping placement ${mp.adformPlacementId} (${mp.adUnitName}) — no CS after intersection`);
       skippedCount++;
+      if (verbose) {
+        placementBreakdown.push({
+          placementId: parseInt(mp.adformPlacementId, 10),
+          adUnitName: mp.adUnitName,
+          creativeSettings: [],
+          action: "skipped",
+          skipReason: `Monday CS IDs [${mp.mondayCsIds.join(",")}] had no overlap with Adform CS IDs [${adformCsIds.join(",")}]`,
+        });
+      }
       continue;
     }
 
@@ -226,12 +239,32 @@ async function processDeal(
       id: parseInt(mp.adformPlacementId, 10),
       creativeSettings: intersected,
     });
+
+    if (verbose) {
+      placementBreakdown.push({
+        placementId: parseInt(mp.adformPlacementId, 10),
+        adUnitName: mp.adUnitName,
+        creativeSettings: intersected,
+        action: "added",
+      });
+    }
   }
 
   // Step 4: Merge — keep existing placements that we're NOT replacing + add new ones
   const keptPlacements = existingPlacements.filter(
     (ep: any) => !newPlacementIds.has(ep.id)
   );
+
+  if (verbose) {
+    for (const kp of keptPlacements) {
+      placementBreakdown.push({
+        placementId: kp.id,
+        adUnitName: "(existing — not from Monday)",
+        creativeSettings: kp.creativeSettings,
+        action: "kept",
+      });
+    }
+  }
 
   const mergedPlacements = [
     ...keptPlacements.map((kp: any) => ({
@@ -255,7 +288,7 @@ async function processDeal(
     console.log(`[Sync] 🧪 DRY RUN — Deal "${dealMatch.name}" (${adformDealId}) would update: ${newPlacements.length} new, ${keptPlacements.length} kept, ${skippedCount} skipped`);
   }
 
-  return {
+  const result: DealSyncResult = {
     dealName: dealMatch.name,
     adformDealId,
     placementsAdded: newPlacements.length,
@@ -263,4 +296,14 @@ async function processDeal(
     placementsSkipped: skippedCount,
     status: dryRun ? "dryRun" : "updated",
   };
+
+  if (verbose) {
+    result.verbose = {
+      existingDeal,    // Full Adform GET response (BEFORE)
+      updatedDeal,     // Full PUT body (AFTER)
+      placementBreakdown,
+    };
+  }
+
+  return result;
 }
