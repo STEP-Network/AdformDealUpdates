@@ -9,7 +9,7 @@ import {
 } from "../lib/monday";
 import { authenticate, getDeal, getPlacement, updateDeal } from "../lib/adform";
 import { matchDealsToAdUnits, intersectCreativeSettings } from "../lib/matcher";
-import type { DealSyncResult, SyncResult, AdformDeal, DealWithPlacements, PlacementDetail } from "../lib/types";
+import type { DealSyncResult, SyncResult, AdformDeal, DealWithPlacements, PlacementDetail, CsInfo } from "../lib/types";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
@@ -88,6 +88,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Attach CS details to ad units
     attachCreativeSettings(adUnits, csMap, adUnitCsLinks);
 
+    // Build Adform CS ID → name lookup (for verbose output)
+    const csNameLookup = new Map<number, string>();
+    for (const cs of csMap.values()) {
+      if (cs.adformCsId && cs.name) {
+        csNameLookup.set(parseInt(cs.adformCsId, 10), cs.name);
+      }
+    }
+
     // ══════════════════════════════════════════════
     // PHASE 2: Match deals ↔ ad units by format
     // ══════════════════════════════════════════════
@@ -108,7 +116,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Process deals in parallel
     const dealPromises = dealsWithPlacements.map((dealMatch) =>
-      processDeal(token, dealMatch, dryRun, verbose)
+      processDeal(token, dealMatch, dryRun, verbose, csNameLookup)
     );
     const results = await Promise.allSettled(dealPromises);
 
@@ -170,12 +178,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
+// ── Helper: resolve CS IDs to {id, name} using Monday lookup ──
+function resolveCsIds(ids: number[], lookup: Map<number, string>): CsInfo[] {
+  return ids.map((id) => ({
+    id,
+    name: lookup.get(id) || undefined,
+  }));
+}
+
 // ── Process a single deal: GET → merge → PUT ──
 async function processDeal(
   token: string,
   dealMatch: DealWithPlacements,
   dryRun: boolean,
-  verbose: boolean
+  verbose: boolean,
+  csNameLookup: Map<number, string>
 ): Promise<DealSyncResult> {
   const { adformDealId, matchedPlacements } = dealMatch;
 
@@ -229,7 +246,7 @@ async function processDeal(
           adUnitName: mp.adUnitName,
           creativeSettings: [],
           action: "skipped",
-          skipReason: `Monday CS IDs [${mp.mondayCsIds.join(",")}] had no overlap with Adform CS IDs [${adformCsIds.join(",")}]`,
+          skipReason: `Monday CS [${mp.mondayCsIds.map(id => { const n = csNameLookup.get(parseInt(id,10)); return n ? `${id} (${n})` : id; }).join(", ")}] had no overlap with Adform CS [${adformCsIds.map(id => { const n = csNameLookup.get(id); return n ? `${id} (${n})` : String(id); }).join(", ")}]`,
         });
       }
       continue;
@@ -244,7 +261,7 @@ async function processDeal(
       placementBreakdown.push({
         placementId: parseInt(mp.adformPlacementId, 10),
         adUnitName: mp.adUnitName,
-        creativeSettings: intersected,
+        creativeSettings: resolveCsIds(intersected, csNameLookup),
         action: "added",
       });
     }
@@ -260,7 +277,7 @@ async function processDeal(
       placementBreakdown.push({
         placementId: kp.id,
         adUnitName: "(existing — not from Monday)",
-        creativeSettings: kp.creativeSettings,
+        creativeSettings: resolveCsIds(kp.creativeSettings, csNameLookup),
         action: "kept",
       });
     }

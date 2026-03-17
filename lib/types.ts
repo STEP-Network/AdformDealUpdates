@@ -77,10 +77,15 @@ export interface AdformPlacementDetail {
 
 // ── Sync result types ──
 
+export interface CsInfo {
+  id: number;
+  name?: string; // Monday CS name (e.g. "320x480 - Interscroller")
+}
+
 export interface PlacementDetail {
   placementId: number;
   adUnitName: string;
-  creativeSettings: number[];
+  creativeSettings: CsInfo[];
   action: "added" | "kept" | "skipped";
   skipReason?: string;
 }
