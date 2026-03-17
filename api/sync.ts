@@ -300,24 +300,70 @@ async function processDeal(
       id: parseInt(mp.adformPlacementId, 10),
       creativeSettings: intersected,
     });
+  }
 
-    if (verbose) {
-      placementBreakdown.push({
-        placementId: parseInt(mp.adformPlacementId, 10),
-        adUnitName: mp.adUnitName,
-        creativeSettings: resolveCsIds(intersected, csNameLookup),
-        action: "added",
-      });
+  // Step 4: Merge placements
+  // - Existing placements NOT matched by Monday → keep as-is
+  // - Existing placements matched by Monday → keep existing CS + add new CS from Monday (never remove)
+  // - New placements (not on Adform yet) → add with intersected CS
+
+  const existingPlacementMap = new Map<number, any>();
+  for (const ep of existingPlacements) {
+    existingPlacementMap.set(ep.id, ep);
+  }
+
+  const mergedPlacements: { id: number; creativeSettings: number[] }[] = [];
+  const addedPlacementIds = new Set<number>();
+
+  // First: handle all Monday-matched placements
+  for (const np of newPlacements) {
+    const existing = existingPlacementMap.get(np.id);
+    if (existing) {
+      // Existing placement — merge CS: keep all existing + add new from Monday
+      const existingCsSet = new Set<number>(existing.creativeSettings);
+      const addedCs: number[] = [];
+      for (const csId of np.creativeSettings) {
+        if (!existingCsSet.has(csId)) {
+          addedCs.push(csId);
+        }
+      }
+      const mergedCs = [...existing.creativeSettings, ...addedCs];
+      mergedPlacements.push({ id: np.id, creativeSettings: mergedCs });
+      addedPlacementIds.add(np.id);
+
+      if (verbose) {
+        placementBreakdown.push({
+          placementId: np.id,
+          adUnitName: matchedPlacements.find(mp => parseInt(mp.adformPlacementId, 10) === np.id)?.adUnitName || "(matched)",
+          creativeSettings: resolveCsIds(addedCs, csNameLookup),
+          action: addedCs.length > 0 ? "merged" : "kept",
+          ...(addedCs.length > 0 ? { mergeDetail: `Kept ${existing.creativeSettings.length} existing CS, added ${addedCs.length} new` } : {}),
+        });
+      }
+    } else {
+      // New placement — add with intersected CS
+      mergedPlacements.push(np);
+      addedPlacementIds.add(np.id);
+
+      if (verbose) {
+        placementBreakdown.push({
+          placementId: np.id,
+          adUnitName: matchedPlacements.find(mp => parseInt(mp.adformPlacementId, 10) === np.id)?.adUnitName || "(new)",
+          creativeSettings: resolveCsIds(np.creativeSettings, csNameLookup),
+          action: "added",
+        });
+      }
     }
   }
 
-  // Step 4: Merge — keep existing placements that we're NOT replacing + add new ones
+  // Then: keep all existing placements that weren't touched by Monday
   const keptPlacements = existingPlacements.filter(
-    (ep: any) => !newPlacementIds.has(ep.id)
+    (ep: any) => !addedPlacementIds.has(ep.id)
   );
 
-  if (verbose) {
-    for (const kp of keptPlacements) {
+  for (const kp of keptPlacements) {
+    mergedPlacements.push({ id: kp.id, creativeSettings: kp.creativeSettings });
+    if (verbose) {
       placementBreakdown.push({
         placementId: kp.id,
         adUnitName: "(existing — not from Monday)",
@@ -326,14 +372,6 @@ async function processDeal(
       });
     }
   }
-
-  const mergedPlacements = [
-    ...keptPlacements.map((kp: any) => ({
-      id: kp.id,
-      creativeSettings: kp.creativeSettings,
-    })),
-    ...newPlacements,
-  ];
 
   // Step 5: Build the full deal body (preserve all original fields, replace placements)
   const updatedDeal: AdformDeal = {
@@ -349,11 +387,22 @@ async function processDeal(
     console.log(`[Sync] 🧪 DRY RUN — Deal "${dealMatch.name}" (${adformDealId}) would update: ${newPlacements.length} new, ${keptPlacements.length} kept, ${skippedCount} skipped`);
   }
 
+  // Count: truly new placements (not previously on Adform)
+  const trulyNewCount = newPlacements.filter(np => !existingPlacementMap.has(np.id)).length;
+  // Count: existing placements that gained new CS
+  const mergedCount = newPlacements.filter(np => {
+    const existing = existingPlacementMap.get(np.id);
+    if (!existing) return false;
+    const existingSet = new Set(existing.creativeSettings);
+    return np.creativeSettings.some(cs => !existingSet.has(cs));
+  }).length;
+
   const result: DealSyncResult = {
     dealName: dealMatch.name,
     adformDealId,
-    placementsAdded: newPlacements.length,
-    placementsKept: keptPlacements.length,
+    placementsAdded: trulyNewCount,
+    placementsMerged: mergedCount,
+    placementsKept: keptPlacements.length + (newPlacements.length - trulyNewCount - mergedCount),
     placementsSkipped: skippedCount,
     status: dryRun ? "dryRun" : "updated",
   };

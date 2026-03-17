@@ -86,14 +86,16 @@ export interface PlacementDetail {
   placementId: number;
   adUnitName: string;
   creativeSettings: CsInfo[];
-  action: "added" | "kept" | "skipped";
+  action: "added" | "kept" | "skipped" | "merged";
   skipReason?: string;
+  mergeDetail?: string;
 }
 
 export interface DealSyncResult {
   dealName: string;
   adformDealId: string;
   placementsAdded: number;
+  placementsMerged?: number; // existing placements that gained new CS
   placementsKept: number;
   placementsSkipped: number; // empty CS after intersection
   status: "updated" | "dryRun" | "error";
