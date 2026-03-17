@@ -13,6 +13,27 @@ const SCOPES = [
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
+// ── Concurrency limiter (max N simultaneous Adform API calls) ──
+const MAX_CONCURRENT = 5;
+let activeRequests = 0;
+const queue: (() => void)[] = [];
+
+async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeRequests >= MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => queue.push(resolve));
+  }
+  activeRequests++;
+  try {
+    return await fn();
+  } finally {
+    activeRequests--;
+    if (queue.length > 0) {
+      const next = queue.shift()!;
+      next();
+    }
+  }
+}
+
 // ── Retry wrapper with exponential backoff ──
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -21,7 +42,7 @@ async function withRetry<T>(
 ): Promise<T> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await fn();
+      return await withConcurrencyLimit(fn);
     } catch (err: any) {
       const status = err?.status || err?.statusCode;
       const isRetryable = status === 429 || status >= 500;
@@ -30,7 +51,10 @@ async function withRetry<T>(
         throw err;
       }
 
-      const delay = Math.pow(2, attempt) * 500; // 1s, 2s, 4s
+      // For 429, use longer delay
+      const delay = status === 429
+        ? Math.pow(2, attempt) * 1500  // 3s, 6s, 12s for rate limits
+        : Math.pow(2, attempt) * 500;  // 1s, 2s, 4s for 5xx
       console.log(`[Adform] ${label} attempt ${attempt} failed (${status}), retrying in ${delay}ms...`);
       await new Promise((r) => setTimeout(r, delay));
     }

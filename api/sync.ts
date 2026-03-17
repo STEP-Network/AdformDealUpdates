@@ -114,11 +114,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const dealResults: DealSyncResult[] = [];
 
-    // Process deals in parallel
-    const dealPromises = dealsWithPlacements.map((dealMatch) =>
-      processDeal(token, dealMatch, dryRun, verbose, csNameLookup)
-    );
-    const results = await Promise.allSettled(dealPromises);
+    // Process deals in batches of 3 to avoid Adform rate limits
+    const DEAL_BATCH_SIZE = 3;
+    const results: PromiseSettledResult<DealSyncResult>[] = [];
+
+    for (let i = 0; i < dealsWithPlacements.length; i += DEAL_BATCH_SIZE) {
+      const batch = dealsWithPlacements.slice(i, i + DEAL_BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((dealMatch) =>
+          processDeal(token, dealMatch, dryRun, verbose, csNameLookup)
+        )
+      );
+      results.push(...batchResults);
+    }
 
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
