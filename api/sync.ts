@@ -169,6 +169,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       timestamp: new Date().toISOString(),
     };
 
+    // Add debug data in verbose mode
+    if (verbose) {
+      (syncResult as any).debug = {
+        dealsData: deals.map((d) => ({
+          name: d.name,
+          adformDealId: d.adformDealId,
+          formatIds: d.formatIds,
+        })),
+        adUnitsData: adUnits.map((au) => ({
+          name: au.name,
+          mondayId: au.mondayId,
+          adformPlacementId: au.adformPlacementId,
+          formatIds: au.formatIds,
+          creativeSettings: au.creativeSettings.map((cs) => ({
+            name: cs.name,
+            adformCsId: cs.adformCsId,
+            formatIds: cs.formatIds,
+          })),
+        })),
+      };
+    }
+
     console.log(`[Sync] Complete: ${JSON.stringify(syncResult)}`);
     return res.status(200).json(syncResult);
 
