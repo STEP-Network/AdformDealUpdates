@@ -111,7 +111,7 @@ async function batchFetchItems(
     batches.map((batchIds) =>
       mondayQuery(`
         query ($ids: [ID!]!) {
-          items(ids: $ids) {
+          items(ids: $ids, limit: 100) {
             id
             name
             column_values(ids: [${colFilter}]) {
