@@ -242,6 +242,364 @@ export function attachCreativeSettings(
   }
 }
 
+// ── Column IDs for the new Adform publisher ID column ──
+const COL_PUBLISHER_ADFORM_ID = "numeric_mm1hsqn1";
+
+// ── Helper: create item on a board ──
+export async function createItem(
+  boardId: string,
+  groupId: string,
+  itemName: string,
+  columnValues: Record<string, unknown>
+): Promise<string> {
+  const data = await mondayQuery(`
+    mutation ($boardId: ID!, $groupId: String!, $name: String!, $cols: JSON!) {
+      create_item(
+        board_id: $boardId
+        group_id: $groupId
+        item_name: $name
+        column_values: $cols
+      ) {
+        id
+      }
+    }
+  `, {
+    boardId,
+    groupId,
+    name: itemName,
+    cols: JSON.stringify(columnValues),
+  });
+  return String(data.create_item.id);
+}
+
+// ── Helper: update a column value ──
+export async function updateColumnValue(
+  boardId: string,
+  itemId: string,
+  columnId: string,
+  value: string
+): Promise<void> {
+  await mondayQuery(`
+    mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+      change_simple_column_value(
+        board_id: $boardId
+        item_id: $itemId
+        column_id: $columnId
+        value: $value
+      ) {
+        id
+      }
+    }
+  `, { boardId, itemId, columnId, value });
+}
+
+// ── Helper: update column with JSON value (for relations, dropdowns, etc.) ──
+export async function updateColumnJson(
+  boardId: string,
+  itemId: string,
+  columnId: string,
+  value: Record<string, unknown>
+): Promise<void> {
+  await mondayQuery(`
+    mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+      change_column_value(
+        board_id: $boardId
+        item_id: $itemId
+        column_id: $columnId
+        value: $value
+      ) {
+        id
+      }
+    }
+  `, { boardId, itemId, columnId, value: JSON.stringify(value) });
+}
+
+// ── Helper: search board items by a text column value ──
+export async function findItemByColumnValue(
+  boardId: string,
+  columnId: string,
+  value: string
+): Promise<{ id: string; name: string } | null> {
+  const data = await mondayQuery(`
+    query ($boardId: ID!, $columnId: String!, $value: CompareValue!) {
+      boards(ids: [$boardId]) {
+        items_page(limit: 1, query_params: {
+          rules: [{ column_id: $columnId, compare_value: [$value], operator: any_of }]
+        }) {
+          items {
+            id
+            name
+          }
+        }
+      }
+    }
+  `, { boardId, columnId, value });
+
+  const items = data.boards?.[0]?.items_page?.items || [];
+  return items.length > 0 ? { id: String(items[0].id), name: items[0].name } : null;
+}
+
+// ── Get all publishers with their ad units (for backfill) ──
+export async function getAllPublishersWithAdUnits(): Promise<
+  { id: string; name: string; adUnitIds: string[]; adformPubId: string }[]
+> {
+  const publishers: { id: string; name: string; adUnitIds: string[]; adformPubId: string }[] = [];
+  let cursor: string | null = null;
+
+  do {
+    let data: any;
+    if (!cursor) {
+      data = await mondayQuery(`
+        query {
+          boards(ids: [${PUBLISHER_BOARD}]) {
+            items_page(limit: 100) {
+              cursor
+              items {
+                id
+                name
+                column_values(ids: ["${COL_PUBLISHER_AD_UNITS}", "${COL_PUBLISHER_ADFORM_ID}"]) {
+                  id
+                  text
+                  value
+                  ... on BoardRelationValue {
+                    linked_item_ids
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+      const page = data.boards[0].items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        publishers.push({
+          id: String(item.id),
+          name: item.name,
+          adUnitIds: getLinkedIds(item, COL_PUBLISHER_AD_UNITS),
+          adformPubId: getTextValue(item, COL_PUBLISHER_ADFORM_ID),
+        });
+      }
+    } else {
+      data = await mondayQuery(`
+        query ($cursor: String!) {
+          next_items_page(cursor: $cursor, limit: 100) {
+            cursor
+            items {
+              id
+              name
+              column_values(ids: ["${COL_PUBLISHER_AD_UNITS}", "${COL_PUBLISHER_ADFORM_ID}"]) {
+                id
+                text
+                value
+                ... on BoardRelationValue {
+                  linked_item_ids
+                }
+              }
+            }
+          }
+        }
+      `, { cursor });
+      const page = data.next_items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        publishers.push({
+          id: String(item.id),
+          name: item.name,
+          adUnitIds: getLinkedIds(item, COL_PUBLISHER_AD_UNITS),
+          adformPubId: getTextValue(item, COL_PUBLISHER_ADFORM_ID),
+        });
+      }
+    }
+  } while (cursor);
+
+  return publishers;
+}
+
+// ── Update publisher's Adform ID ──
+export async function updatePublisherAdformId(
+  publisherId: string,
+  adformId: string
+): Promise<void> {
+  await updateColumnValue(PUBLISHER_BOARD, publisherId, COL_PUBLISHER_ADFORM_ID, adformId);
+}
+
+// ── Get all CS items from the CS board (for lookup by Adform ID) ──
+export async function getAllCreativeSettings(): Promise<
+  Map<string, { mondayId: string; name: string; adformCsId: string; size: string }>
+> {
+  const csMap = new Map<string, { mondayId: string; name: string; adformCsId: string; size: string }>();
+  let cursor: string | null = null;
+
+  do {
+    let data: any;
+    if (!cursor) {
+      data = await mondayQuery(`
+        query {
+          boards(ids: [${CS_BOARD}]) {
+            items_page(limit: 100) {
+              cursor
+              items {
+                id
+                name
+                column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np"]) {
+                  id
+                  text
+                  value
+                }
+              }
+            }
+          }
+        }
+      `);
+      const page = data.boards[0].items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        const adformId = getTextValue(item, COL_CS_ADFORM_ID);
+        if (adformId) {
+          csMap.set(adformId, {
+            mondayId: String(item.id),
+            name: item.name,
+            adformCsId: adformId,
+            size: getTextValue(item, "text_mkvgb9np"),
+          });
+        }
+      }
+    } else {
+      data = await mondayQuery(`
+        query ($cursor: String!) {
+          next_items_page(cursor: $cursor, limit: 100) {
+            cursor
+            items {
+              id
+              name
+              column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np"]) {
+                id
+                text
+                value
+              }
+            }
+          }
+        }
+      `, { cursor });
+      const page = data.next_items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        const adformId = getTextValue(item, COL_CS_ADFORM_ID);
+        if (adformId) {
+          csMap.set(adformId, {
+            mondayId: String(item.id),
+            name: item.name,
+            adformCsId: adformId,
+            size: getTextValue(item, "text_mkvgb9np"),
+          });
+        }
+      }
+    }
+  } while (cursor);
+
+  return csMap;
+}
+
+// ── Get all ad unit items from the ad units board (for lookup by Adform placement ID) ──
+export async function getAllAdUnitsForLookup(): Promise<
+  Map<string, { mondayId: string; name: string; adformPlacementId: string }>
+> {
+  const adUnitMap = new Map<string, { mondayId: string; name: string; adformPlacementId: string }>();
+  let cursor: string | null = null;
+
+  do {
+    let data: any;
+    if (!cursor) {
+      data = await mondayQuery(`
+        query {
+          boards(ids: [${AD_UNITS_BOARD}]) {
+            items_page(limit: 100) {
+              cursor
+              items {
+                id
+                name
+                column_values(ids: ["${COL_ADUNIT_ADFORM_PLACEMENT_ID}"]) {
+                  id
+                  text
+                  value
+                }
+              }
+            }
+          }
+        }
+      `);
+      const page = data.boards[0].items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        const placementId = getTextValue(item, COL_ADUNIT_ADFORM_PLACEMENT_ID);
+        if (placementId) {
+          adUnitMap.set(placementId, {
+            mondayId: String(item.id),
+            name: item.name,
+            adformPlacementId: placementId,
+          });
+        }
+      }
+    } else {
+      data = await mondayQuery(`
+        query ($cursor: String!) {
+          next_items_page(cursor: $cursor, limit: 100) {
+            cursor
+            items {
+              id
+              name
+              column_values(ids: ["${COL_ADUNIT_ADFORM_PLACEMENT_ID}"]) {
+                id
+                text
+                value
+              }
+            }
+          }
+        }
+      `, { cursor });
+      const page = data.next_items_page;
+      cursor = page.cursor;
+      for (const item of page.items) {
+        const placementId = getTextValue(item, COL_ADUNIT_ADFORM_PLACEMENT_ID);
+        if (placementId) {
+          adUnitMap.set(placementId, {
+            mondayId: String(item.id),
+            name: item.name,
+            adformPlacementId: placementId,
+          });
+        }
+      }
+    }
+  } while (cursor);
+
+  return adUnitMap;
+}
+
+// Board/column IDs exported for use in endpoints
+export const BOARDS = {
+  PUBLISHER: PUBLISHER_BOARD,
+  DEALS: DEALS_BOARD,
+  AD_UNITS: AD_UNITS_BOARD,
+  CS: CS_BOARD,
+} as const;
+
+export const COLUMNS = {
+  ADUNIT_ADFORM_PLACEMENT_ID: COL_ADUNIT_ADFORM_PLACEMENT_ID,
+  ADUNIT_FORMATS: COL_ADUNIT_FORMATS,
+  ADUNIT_CREATIVE_SETTINGS: COL_ADUNIT_CREATIVE_SETTINGS,
+  ADUNIT_PUBLISHER_LINK: "board_relation_mkvgpb85",
+  ADUNIT_SOURCE: "color_mkqpmnmr",
+  ADUNIT_TYPE: "color_mkqp16yy",
+  ADUNIT_SIZES: "dropdown_mkqxzvgj",
+  CS_ADFORM_ID: COL_CS_ADFORM_ID,
+  CS_SIZE: "text_mkvgb9np",
+  CS_TYPE: "color_mkvgxw8x",
+  CS_ADUNIT_LINK: "board_relation_mkznq1wq",
+  PUBLISHER_AD_UNITS: COL_PUBLISHER_AD_UNITS,
+  PUBLISHER_ADFORM_ID: COL_PUBLISHER_ADFORM_ID,
+} as const;
+
 // ── Write sync status to publisher row ──
 export async function updatePublisherStatus(publisherId: string, status: string): Promise<void> {
   try {
