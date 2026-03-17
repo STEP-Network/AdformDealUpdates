@@ -25,3 +25,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Backups
+backup_*.json

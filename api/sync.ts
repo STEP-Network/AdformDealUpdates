@@ -22,14 +22,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let publisherId: string | undefined;
     let dryRun = false;
     let maxDeals: number | null = null;
+    let skipDeals = 0;
     let verbose = false;
 
     if (req.method === "GET") {
-      // Test mode: GET /api/sync?publisherId=123&maxDeals=1&dryRun=true&verbose=true
+      // Test mode: GET /api/sync?publisherId=123&maxDeals=1&skipDeals=5&dryRun=true&verbose=true
       publisherId = req.query.publisherId as string;
       dryRun = req.query.dryRun === "true";
       verbose = req.query.verbose === "true";
       maxDeals = req.query.maxDeals ? parseInt(req.query.maxDeals as string, 10) : null;
+      skipDeals = req.query.skipDeals ? parseInt(req.query.skipDeals as string, 10) : 0;
     } else if (req.method === "POST") {
       // Monday webhook: POST with event payload
       publisherId = req.body?.event?.pulseId?.toString();
@@ -43,6 +45,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (req.query.dryRun === "true") dryRun = true;
       if (req.query.verbose === "true") verbose = true;
       if (req.query.maxDeals) maxDeals = parseInt(req.query.maxDeals as string, 10);
+      if (req.query.skipDeals) skipDeals = parseInt(req.query.skipDeals as string, 10);
     }
 
     if (!publisherId) {
@@ -71,7 +74,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let deals = await getDeals(dealIds);
     console.log(`[Sync] Fetched ${deals.length} deals`);
 
-    // Apply maxDeals limit
+    // Apply skipDeals + maxDeals limit
+    if (skipDeals > 0) {
+      deals = deals.slice(skipDeals);
+      console.log(`[Sync] Skipped first ${skipDeals} deals`);
+    }
     if (maxDeals !== null && maxDeals > 0) {
       deals = deals.slice(0, maxDeals);
       console.log(`[Sync] Limited to ${deals.length} deals (maxDeals=${maxDeals})`);
