@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/sync.ts": {
+      "maxDuration": 60
+    }
+  }
+}

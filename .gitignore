@@ -5,7 +5,7 @@
 
 # Node
 node_modules/
-package-lock.json
+dist/
 
 # Python
 __pycache__/
