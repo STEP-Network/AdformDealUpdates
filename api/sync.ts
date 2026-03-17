@@ -171,23 +171,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Add debug data in verbose mode
     if (verbose) {
+      // Check which CS IDs were requested vs returned
+      const csIdsRequested = csIds;
+      const csIdsReturned = Array.from(csMap.keys());
+      const csMissing = csIdsRequested.filter((id) => !csMap.has(id));
+
+      // Check adUnitCsLinks for billboard_1
+      const billboard1Links = Array.from(adUnitCsLinks.entries()).find(
+        ([_, __]) => true // dump all
+      );
+
       (syncResult as any).debug = {
+        totalCsRequested: csIdsRequested.length,
+        totalCsReturned: csIdsReturned.length,
+        csMissing: csMissing.length > 0 ? csMissing.slice(0, 20) : "none",
+        adUnitCsLinks: Object.fromEntries(
+          Array.from(adUnitCsLinks.entries()).filter(([key]) => {
+            const au = adUnits.find((a) => a.mondayId === key);
+            return au?.name === "billboard_1";
+          })
+        ),
         dealsData: deals.map((d) => ({
           name: d.name,
           adformDealId: d.adformDealId,
           formatIds: d.formatIds,
         })),
-        adUnitsData: adUnits.map((au) => ({
-          name: au.name,
-          mondayId: au.mondayId,
-          adformPlacementId: au.adformPlacementId,
-          formatIds: au.formatIds,
-          creativeSettings: au.creativeSettings.map((cs) => ({
-            name: cs.name,
-            adformCsId: cs.adformCsId,
-            formatIds: cs.formatIds,
+        adUnitsData: adUnits
+          .filter((au) => au.name === "billboard_1")
+          .map((au) => ({
+            name: au.name,
+            mondayId: au.mondayId,
+            adformPlacementId: au.adformPlacementId,
+            formatIds: au.formatIds,
+            creativeSettings: au.creativeSettings.map((cs) => ({
+              mondayId: cs.mondayId,
+              name: cs.name,
+              adformCsId: cs.adformCsId,
+              formatIds: cs.formatIds,
+            })),
           })),
-        })),
       };
     }
 
