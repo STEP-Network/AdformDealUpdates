@@ -23,18 +23,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const token = await authenticate();
 
-    // ── Fetch ALL deals from Adform using offset pagination ──
+    // ── Fetch ALL deals from Adform using pageSize pagination ──
     const allDeals: any[] = [];
-    let offset = 0;
+    let page = 1;
     let hasMore = true;
 
     while (hasMore) {
-      // Try limit/offset first, then plain if it fails
-      const url = offset === 0
-        ? `${API_BASE}/deals`
-        : `${API_BASE}/deals?offset=${offset}&limit=${PAGE_SIZE}`;
-
-      console.log(`[ListDeals] Fetching: ${url} (offset=${offset})`);
+      const url = `${API_BASE}/deals?page=${page}&pageSize=${PAGE_SIZE}`;
+      console.log(`[ListDeals] Fetching page ${page}: ${url}`);
 
       const resp = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
@@ -42,32 +38,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (!resp.ok) {
         const text = await resp.text();
-        // If offset pagination doesn't work on subsequent pages, stop
-        if (offset > 0) {
-          console.log(`[ListDeals] Pagination failed at offset ${offset}: ${resp.status}`);
-          hasMore = false;
-          break;
+        if (page === 1) {
+          return res.status(resp.status).json({
+            error: `Adform API failed`,
+            status: resp.status,
+            body: text,
+          });
         }
-        return res.status(resp.status).json({
-          error: `Adform API failed`,
-          status: resp.status,
-          body: text,
-        });
+        // Pagination exhausted
+        console.log(`[ListDeals] Page ${page} failed (${resp.status}), stopping`);
+        hasMore = false;
+        break;
       }
 
       const data = await resp.json();
       const deals = Array.isArray(data) ? data : data.deals || data.data || [];
 
-      console.log(`[ListDeals] Got ${deals.length} deals at offset ${offset}`);
+      console.log(`[ListDeals] Got ${deals.length} deals on page ${page}`);
+
+      if (deals.length === 0) {
+        hasMore = false;
+        break;
+      }
+
       allDeals.push(...deals);
 
-      // If we got fewer than PAGE_SIZE, we have all of them
+      // If we got fewer than requested, that's the last page
       if (deals.length < PAGE_SIZE) {
         hasMore = false;
       } else {
-        offset += deals.length;
-        // Safety: max 100k deals
-        if (offset > 100000) hasMore = false;
+        page++;
+        // Safety: max 20 pages = 100k deals
+        if (page > 20) hasMore = false;
       }
     }
 
