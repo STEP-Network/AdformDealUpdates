@@ -426,9 +426,9 @@ export async function updatePublisherAdformId(
 
 // ── Get all CS items from the CS board (for lookup by Adform ID) ──
 export async function getAllCreativeSettings(): Promise<
-  Map<string, { mondayId: string; name: string; adformCsId: string; size: string }>
+  Map<string, { mondayId: string; name: string; adformCsId: string; size: string; formatIds: string[] }>
 > {
-  const csMap = new Map<string, { mondayId: string; name: string; adformCsId: string; size: string }>();
+  const csMap = new Map<string, { mondayId: string; name: string; adformCsId: string; size: string; formatIds: string[] }>();
   let cursor: string | null = null;
 
   do {
@@ -442,10 +442,13 @@ export async function getAllCreativeSettings(): Promise<
               items {
                 id
                 name
-                column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np"]) {
+                column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np", "${COL_CS_FORMAT}"]) {
                   id
                   text
                   value
+                  ... on BoardRelationValue {
+                    linked_item_ids
+                  }
                 }
               }
             }
@@ -462,6 +465,7 @@ export async function getAllCreativeSettings(): Promise<
             name: item.name,
             adformCsId: adformId,
             size: getTextValue(item, "text_mkvgb9np"),
+            formatIds: getLinkedIds(item, COL_CS_FORMAT),
           });
         }
       }
@@ -473,10 +477,13 @@ export async function getAllCreativeSettings(): Promise<
             items {
               id
               name
-              column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np"]) {
+              column_values(ids: ["${COL_CS_ADFORM_ID}", "text_mkvgb9np", "${COL_CS_FORMAT}"]) {
                 id
                 text
                 value
+                ... on BoardRelationValue {
+                  linked_item_ids
+                }
               }
             }
           }
@@ -492,6 +499,7 @@ export async function getAllCreativeSettings(): Promise<
             name: item.name,
             adformCsId: adformId,
             size: getTextValue(item, "text_mkvgb9np"),
+            formatIds: getLinkedIds(item, COL_CS_FORMAT),
           });
         }
       }

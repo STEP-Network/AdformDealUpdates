@@ -228,18 +228,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             name: cs.name,
             adformCsId: csIdStr,
             size,
+            formatIds: [], // newly created CS won't have formats yet
           });
         }
       }
 
-      // Link CS to ad unit
-      if (!dryRun && csMondayIdsForLink.length > 0 && adUnitMondayId !== "dry-run") {
-        await updateColumnJson(
-          BOARDS.AD_UNITS,
-          adUnitMondayId,
-          COLUMNS.ADUNIT_CREATIVE_SETTINGS,
-          { item_ids: csMondayIdsForLink }
-        );
+      // Collect format IDs from CS items (each CS on Monday has formats linked)
+      const formatIdSet = new Set<number>();
+      for (const cs of csDetails) {
+        const csIdStr = String(cs.id);
+        const existingCsItem = existingCs.get(csIdStr);
+        if (existingCsItem && existingCsItem.formatIds) {
+          for (const fid of existingCsItem.formatIds) {
+            formatIdSet.add(parseInt(fid, 10));
+          }
+        }
+      }
+
+      // Link CS to ad unit + formats to ad unit
+      if (!dryRun && adUnitMondayId !== "dry-run") {
+        if (csMondayIdsForLink.length > 0) {
+          await updateColumnJson(
+            BOARDS.AD_UNITS,
+            adUnitMondayId,
+            COLUMNS.ADUNIT_CREATIVE_SETTINGS,
+            { item_ids: csMondayIdsForLink }
+          );
+        }
+        if (formatIdSet.size > 0) {
+          await updateColumnJson(
+            BOARDS.AD_UNITS,
+            adUnitMondayId,
+            COLUMNS.ADUNIT_FORMATS,
+            { item_ids: Array.from(formatIdSet) }
+          );
+        }
       }
 
       results.push({
