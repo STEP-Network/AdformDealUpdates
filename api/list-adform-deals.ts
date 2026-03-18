@@ -2,7 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { authenticate } from "../lib/adform";
 
 const API_BASE = "https://api.adform.com/v1/seller";
-const PAGE_SIZE = 100; // Adform returns ~100 per page
+const BATCH_SIZE = 100; // Adform max limit per request
 
 /**
  * GET /api/list-adform-deals
@@ -10,29 +10,28 @@ const PAGE_SIZE = 100; // Adform returns ~100 per page
  * Lists all deals from Adform and compares with Monday board.
  * Query params:
  *   status=accepted    — client-side filter by deal status (default: accepted)
- *   limit=50           — max deals to return in response (default: 100)
- *   raw=true           — return raw Adform response for first 3 deals
+ *   limit=50           — max missing deals to return (default: 100)
+ *   raw=true           — include raw Adform data for last 3 deals
  *   months=6           — how many months back to look (default: 6)
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const statusFilter = (req.query.status as string) || "accepted";
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+    const outputLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
     const raw = req.query.raw === "true";
     const months = req.query.months ? parseInt(req.query.months as string, 10) : 6;
 
     const token = await authenticate();
 
-    // ── Fetch ALL deals from Adform using page-based pagination ──
-    // API returns ~100 per page, ignores pageSize param
+    // ── Fetch ALL deals from Adform using offset+limit pagination ──
+    // API supports: ?offset=N&limit=N (max limit=100)
     const allDeals: any[] = [];
-    let page = 1;
+    let offset = 0;
     let hasMore = true;
-    const seenIds = new Set<number>(); // dedup safety
 
     while (hasMore) {
-      const url = `${API_BASE}/deals?page=${page}`;
-      console.log(`[ListDeals] Fetching page ${page}: ${url}`);
+      const url = `${API_BASE}/deals?offset=${offset}&limit=${BATCH_SIZE}`;
+      console.log(`[ListDeals] Fetching offset=${offset}`);
 
       const resp = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
@@ -40,72 +39,49 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (!resp.ok) {
         const text = await resp.text();
-        if (page === 1) {
+        if (offset === 0) {
           return res.status(resp.status).json({
             error: `Adform API failed`,
             status: resp.status,
             body: text,
           });
         }
-        // Pagination exhausted (some APIs return 4xx on out-of-range pages)
-        console.log(`[ListDeals] Page ${page} failed (${resp.status}), stopping`);
+        // Pagination may return error when offset exceeds total
+        console.log(`[ListDeals] offset=${offset} failed (${resp.status}), stopping`);
         hasMore = false;
         break;
       }
 
       const data = await resp.json();
-      const deals = Array.isArray(data) ? data : data.deals || data.data || [];
-
-      console.log(`[ListDeals] Got ${deals.length} deals on page ${page}`);
+      const deals = Array.isArray(data) ? data : [];
 
       if (deals.length === 0) {
         hasMore = false;
         break;
       }
 
-      // Dedup check: if first deal of this page was already seen, API is cycling
-      if (deals[0]?.id && seenIds.has(deals[0].id)) {
-        console.log(`[ListDeals] Duplicate page detected at page ${page}, stopping`);
+      allDeals.push(...deals);
+      offset += deals.length;
+
+      console.log(`[ListDeals] Got ${deals.length} deals, total so far: ${allDeals.length}`);
+
+      // If fewer than requested, that's the last page
+      if (deals.length < BATCH_SIZE) {
         hasMore = false;
-        break;
       }
 
-      for (const d of deals) {
-        if (!seenIds.has(d.id)) {
-          seenIds.add(d.id);
-          allDeals.push(d);
-        }
-      }
-
-      // If we got fewer than typical page size, that's likely the last page
-      if (deals.length < PAGE_SIZE) {
+      // Safety: max 20k deals
+      if (offset >= 20000) {
+        console.log(`[ListDeals] Hit 20k safety limit, stopping`);
         hasMore = false;
-      } else {
-        page++;
-        // Safety: max 200 pages = ~20k deals
-        if (page > 200) {
-          console.log(`[ListDeals] Hit 200 page limit, stopping`);
-          hasMore = false;
-        }
       }
     }
-
-    console.log(`[ListDeals] Fetched ${page} pages, ${allDeals.length} unique deals`);
 
     console.log(`[ListDeals] Total deals from Adform: ${allDeals.length}`);
 
-    // Log date range of fetched deals for debugging
-    if (allDeals.length > 0) {
-      const dates = allDeals
-        .map((d: any) => d.validPeriod?.from || d.createdAt?.slice(0, 10) || "")
-        .filter(Boolean)
-        .sort();
-      console.log(`[ListDeals] Date range: ${dates[0]} → ${dates[dates.length - 1]}`);
-    }
-
     // ── Client-side filtering ──
 
-    // Filter by status (Adform API doesn't support query filter)
+    // Filter by status
     const statusFiltered = statusFilter
       ? allDeals.filter((d: any) => d.status === statusFilter)
       : allDeals;
@@ -118,9 +94,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const cutoffStr = cutoff.toISOString().slice(0, 10);
 
     const recentDeals = statusFiltered.filter((d: any) => {
-      // Use validPeriod.from, fall back to createdAt
       const dateStr = d.validPeriod?.from || d.createdAt?.slice(0, 10) || "";
-      if (!dateStr) return true; // include if no date info
+      if (!dateStr) return true;
       return dateStr >= cutoffStr;
     });
 
@@ -176,12 +151,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
       const mondayJson: any = await mondayResp.json();
 
-      const page = cursor
+      const pg = cursor
         ? mondayJson.data?.next_items_page
         : mondayJson.data?.boards?.[0]?.items_page;
 
-      cursor = page?.cursor || null;
-      for (const item of page?.items || []) {
+      cursor = pg?.cursor || null;
+      for (const item of pg?.items || []) {
         const adformId = item.column_values?.[0]?.text?.trim();
         if (adformId) {
           mondayDealIds.add(adformId);
@@ -204,7 +179,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return dateB.localeCompare(dateA);
     });
 
-    const output = missingDeals.slice(0, limit).map((d: any) => ({
+    const output = missingDeals.slice(0, outputLimit).map((d: any) => ({
       id: d.id,
       dealId: d.dealId,
       name: d.name,
@@ -216,7 +191,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       inventorySourceId: d.inventorySourceId,
     }));
 
-    // Status breakdown for all fetched deals
+    // Status breakdown
     const statusBreakdown: Record<string, number> = {};
     for (const d of allDeals) {
       statusBreakdown[d.status] = (statusBreakdown[d.status] || 0) + 1;
@@ -231,7 +206,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       missingFromMonday: missingDeals.length,
       dateCutoff: cutoffStr,
       statusFilter,
-      sampleRaw: raw ? allDeals.slice(-3) : undefined, // last 3 (newest)
+      sampleRaw: raw ? allDeals.slice(-3) : undefined,
       missingDeals: output,
     });
   } catch (err: any) {
