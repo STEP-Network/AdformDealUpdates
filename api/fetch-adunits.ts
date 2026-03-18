@@ -271,6 +271,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         status: placementStatus,
         adUnitAction,
         adUnitMondayId,
+        formatsLinked: Array.from(formatIdSet),
         csActions,
       });
     }
