@@ -12,7 +12,7 @@ import {
 import { authenticate, getInventorySourcePlacements, getPlacement } from "../lib/adform";
 
 // Column ID for Adform publisher ID on publisher board
-const COL_PUBLISHER_ADFORM_ID = "numeric_mm1hsqn1";
+const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
 
 /**
  * GET /api/fetch-adunits?publisherId=XXX

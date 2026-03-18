@@ -243,7 +243,7 @@ export function attachCreativeSettings(
 }
 
 // ── Column IDs for the new Adform publisher ID column ──
-const COL_PUBLISHER_ADFORM_ID = "numeric_mm1hsqn1";
+const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
 
 // ── Helper: create item on a board ──
 export async function createItem(
