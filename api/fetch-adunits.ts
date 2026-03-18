@@ -9,7 +9,7 @@ import {
   BOARDS,
   COLUMNS,
 } from "../lib/monday";
-import { authenticate, getInventorySourcePlacements, getPlacement } from "../lib/adform";
+import { authenticate, getPublisherPlacements } from "../lib/adform";
 
 // Column ID for Adform publisher ID on publisher board
 const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
@@ -18,15 +18,17 @@ const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
  * GET /api/fetch-adunits?publisherId=XXX
  * POST /api/fetch-adunits (Monday webhook)
  *
- * Fetches all placements from Adform for the publisher's inventorySourceId,
- * then:
+ * Fetches all placements from Adform via GET /v1/seller/placements?publisherIds={id}
+ * The response includes CS with names — no per-placement calls needed.
+ *
+ * Then:
  * 1. Creates ad unit items on Monday if they don't exist (matched by Adform placement ID)
  * 2. Creates CS items on Monday if they don't exist (matched by Adform CS ID)
  * 3. Links CS to ad units, ad units to publisher
  *
  * Query params:
- *   dryRun=true   — show what would be created, don't write
- *   maxPlacements=5 — limit placements processed
+ *   dryRun=true       — show what would be created, don't write
+ *   maxPlacements=5   — limit placements processed
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
@@ -55,37 +57,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (!publisherId) {
-      return res.status(400).json({
-        error: "Missing publisherId",
-      });
+      return res.status(400).json({ error: "Missing publisherId" });
     }
 
-    console.log(
-      `[FetchAdUnits] Starting for publisher ${publisherId} | dryRun=${dryRun} | maxPlacements=${maxPlacements}`
-    );
+    console.log(`[FetchAdUnits] Starting for publisher ${publisherId} | dryRun=${dryRun} | maxPlacements=${maxPlacements}`);
 
     // ── Step 1: Get publisher info + Adform publisher ID from Monday ──
     const { publisherName } = await getPublisherLinks(publisherId);
 
-    // Get the Adform publisher ID from the numeric column
-    const pubData = await import("../lib/monday").then((m) =>
-      m.default ? undefined : undefined
-    );
-
-    // Fetch the publisher item directly to get Adform ID
-    const mondayMod = await import("../lib/monday");
-    const pubItems = await (mondayMod as any).batchFetchItems
-      ? null
-      : null;
-
-    // Use a direct query to get the Adform publisher ID
+    // Fetch Adform publisher ID from the text column
     const MONDAY_API_URL = "https://api.monday.com/v2";
-    const token = process.env.MONDAY_API_TOKEN;
-    if (!token) throw new Error("MONDAY_API_TOKEN not set");
+    const mondayToken = process.env.MONDAY_API_TOKEN;
+    if (!mondayToken) throw new Error("MONDAY_API_TOKEN not set");
 
     const pubResp = await fetch(MONDAY_API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: token },
+      headers: { "Content-Type": "application/json", Authorization: mondayToken },
       body: JSON.stringify({
         query: `query ($id: [ID!]!) {
           items(ids: $id) {
@@ -99,83 +86,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }),
     });
     const pubJson: any = await pubResp.json();
-    const adformPubIdText =
-      pubJson.data?.items?.[0]?.column_values?.[0]?.text || "";
+    const adformPublisherId = (pubJson.data?.items?.[0]?.column_values?.[0]?.text || "").trim();
 
-    if (!adformPubIdText) {
-      const msg = `Publisher "${publisherName}" has no Adform publisher ID. Run backfill first.`;
-      return res.status(400).json({ error: msg });
+    if (!adformPublisherId) {
+      return res.status(400).json({
+        error: `Publisher "${publisherName}" has no Adform publisher ID. Run backfill first.`,
+      });
     }
 
-    const adformPublisherId = adformPubIdText.replace(/\.0$/, ""); // numeric columns may have .0
-    console.log(
-      `[FetchAdUnits] Publisher "${publisherName}" → Adform ID: ${adformPublisherId}`
-    );
+    console.log(`[FetchAdUnits] Publisher "${publisherName}" → Adform ID: ${adformPublisherId}`);
 
-    // ── Step 2: Authenticate with Adform and fetch all placements ──
+    // ── Step 2: Fetch all placements from Adform (includes CS with names) ──
     const adformToken = await authenticate();
-    const placements = await getInventorySourcePlacements(
-      adformToken,
-      adformPublisherId
-    );
-    console.log(
-      `[FetchAdUnits] Adform returned ${placements.length} placements`
-    );
+    const allPlacements = await getPublisherPlacements(adformToken, adformPublisherId);
+    console.log(`[FetchAdUnits] Adform returned ${allPlacements.length} placements`);
 
-    let toProcess = placements;
+    let toProcess = allPlacements;
     if (maxPlacements) {
-      toProcess = placements.slice(0, maxPlacements);
+      toProcess = allPlacements.slice(0, maxPlacements);
     }
 
-    // ── Step 3: Fetch CS details for each placement (parallel, batched) ──
-    const BATCH_SIZE = 5;
-    const placementDetails: { placement: any; csDetails: any[] }[] = [];
-
-    for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
-      const batch = toProcess.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(
-        batch.map(async (p: any) => {
-          const detail = await getPlacement(adformToken, String(p.id));
-          return {
-            placement: p,
-            csDetails: (detail.creativeSettings || []).map((cs: any) =>
-              typeof cs === "number" ? { id: cs } : cs
-            ),
-          };
-        })
-      );
-      placementDetails.push(...batchResults);
-    }
-
-    // ── Step 4: Load existing Monday data for dedup ──
+    // ── Step 3: Load existing Monday data for dedup ──
     console.log(`[FetchAdUnits] Loading existing Monday data for dedup...`);
     const [existingAdUnits, existingCs] = await Promise.all([
       getAllAdUnitsForLookup(),
       getAllCreativeSettings(),
     ]);
-    console.log(
-      `[FetchAdUnits] Existing: ${existingAdUnits.size} ad units, ${existingCs.size} CS`
-    );
+    console.log(`[FetchAdUnits] Existing: ${existingAdUnits.size} ad units, ${existingCs.size} CS`);
 
-    // ── Step 5: Process each placement ──
+    // ── Step 4: Process each placement ──
     const results: {
       placementName: string;
       placementId: number;
+      status: string;
       adUnitAction: string;
       adUnitMondayId?: string;
       csActions: { csId: number; name: string; action: string; mondayId?: string }[];
     }[] = [];
 
-    for (const { placement, csDetails } of placementDetails) {
+    for (const placement of toProcess) {
       const placementId = placement.id;
       const placementName = placement.name || `placement_${placementId}`;
-      const existing = existingAdUnits.get(String(placementId));
+      const placementStatus = placement.status || "unknown";
+      const csDetails: { id: number; name: string }[] = (placement.creativeSettings || []).map(
+        (cs: any) => (typeof cs === "number" ? { id: cs, name: `CS_${cs}` } : cs)
+      );
 
+      const existing = existingAdUnits.get(String(placementId));
       let adUnitMondayId: string;
       let adUnitAction: string;
 
       if (existing) {
-        // Already exists on Monday
         adUnitMondayId = existing.mondayId;
         adUnitAction = "exists";
       } else if (dryRun) {
@@ -185,28 +146,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Create the ad unit on Monday
         const columnValues: Record<string, unknown> = {
           [COLUMNS.ADUNIT_ADFORM_PLACEMENT_ID]: String(placementId),
-          [COLUMNS.ADUNIT_SOURCE]: { label: "Adform" },
-          [COLUMNS.ADUNIT_TYPE]: { label: "Ad Unit" },
         };
-
-        // Extract sizes from CS details for the Sizes dropdown
-        const sizes = new Set<string>();
-        for (const cs of csDetails) {
-          const csName = cs.name || "";
-          // Try to extract size from CS name (e.g. "Standard 300x250" → "300x250")
-          const sizeMatch = csName.match(/(\d+x\d+)/);
-          if (sizeMatch) sizes.add(sizeMatch[1]);
-        }
-
-        if (sizes.size > 0) {
-          columnValues[COLUMNS.ADUNIT_SIZES] = {
-            labels: Array.from(sizes),
-          };
-        }
 
         adUnitMondayId = await createItem(
           BOARDS.AD_UNITS,
-          "group_mkvgv1kg", // "adform ad units" group
+          "topics", // default group
           placementName,
           columnValues
         );
@@ -219,8 +163,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           { item_ids: [parseInt(publisherId, 10)] }
         );
 
-        // Link publisher to ad unit (reverse relation)
-        // Get current ad unit links and add new one
+        // Link publisher to ad unit
         await updateColumnJson(
           BOARDS.PUBLISHER,
           publisherId,
@@ -229,7 +172,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         );
 
         adUnitAction = "created";
-        // Add to lookup so subsequent placements can find it
         existingAdUnits.set(String(placementId), {
           mondayId: adUnitMondayId,
           name: placementName,
@@ -238,104 +180,99 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       // Process CS for this placement
-      const csActions: {
-        csId: number;
-        name: string;
-        action: string;
-        mondayId?: string;
-      }[] = [];
-      const csMonadyIdsForLink: number[] = [];
+      const csActions: { csId: number; name: string; action: string; mondayId?: string }[] = [];
+      const csMondayIdsForLink: number[] = [];
 
       for (const cs of csDetails) {
-        const csId = cs.id || cs;
-        const csIdStr = String(csId);
+        const csIdStr = String(cs.id);
         const existingCsItem = existingCs.get(csIdStr);
-        const csName = cs.name || `CS_${csId}`;
 
         if (existingCsItem) {
           csActions.push({
-            csId,
+            csId: cs.id,
             name: existingCsItem.name,
             action: "exists",
             mondayId: existingCsItem.mondayId,
           });
-          csMonadyIdsForLink.push(parseInt(existingCsItem.mondayId, 10));
+          csMondayIdsForLink.push(parseInt(existingCsItem.mondayId, 10));
         } else if (dryRun) {
           csActions.push({
-            csId,
-            name: csName,
+            csId: cs.id,
+            name: cs.name,
             action: "would_create",
           });
         } else {
-          // Extract size from name
-          const sizeMatch = csName.match(/(\d+x\d+)/);
+          // Extract size from name (e.g. "Standard 300x250" → "300x250")
+          const sizeMatch = cs.name.match(/(\d+x\d+)/);
           const size = sizeMatch ? sizeMatch[1] : "";
-
-          // Determine type (RM vs Standard)
-          const isRM = /\bRM\b/i.test(csName);
+          const isRM = /\bRM\b/i.test(cs.name);
 
           const csColumnValues: Record<string, unknown> = {
             [COLUMNS.CS_ADFORM_ID]: csIdStr,
             [COLUMNS.CS_SIZE]: size,
-            [COLUMNS.CS_TYPE]: { label: isRM ? "RM" : "Standard" },
           };
 
           const newCsMondayId = await createItem(
             BOARDS.CS,
-            "topics", // default group
-            csName,
+            "topics",
+            cs.name,
             csColumnValues
           );
 
           csActions.push({
-            csId,
-            name: csName,
+            csId: cs.id,
+            name: cs.name,
             action: "created",
             mondayId: newCsMondayId,
           });
-          csMonadyIdsForLink.push(parseInt(newCsMondayId, 10));
+          csMondayIdsForLink.push(parseInt(newCsMondayId, 10));
 
-          // Add to lookup for dedup
+          // Add to lookup for dedup across placements
           existingCs.set(csIdStr, {
             mondayId: newCsMondayId,
-            name: csName,
+            name: cs.name,
             adformCsId: csIdStr,
             size,
           });
         }
       }
 
-      // Link CS to ad unit (if not dry run and we have CS to link)
-      if (!dryRun && csMonadyIdsForLink.length > 0 && adUnitMondayId !== "dry-run") {
+      // Link CS to ad unit
+      if (!dryRun && csMondayIdsForLink.length > 0 && adUnitMondayId !== "dry-run") {
         await updateColumnJson(
           BOARDS.AD_UNITS,
           adUnitMondayId,
           COLUMNS.ADUNIT_CREATIVE_SETTINGS,
-          { item_ids: csMonadyIdsForLink }
+          { item_ids: csMondayIdsForLink }
         );
       }
 
       results.push({
         placementName,
         placementId,
+        status: placementStatus,
         adUnitAction,
         adUnitMondayId,
         csActions,
       });
     }
 
-    // ── Step 6: Update status ──
-    const created = results.filter((r) => r.adUnitAction === "created").length;
-    const existed = results.filter((r) => r.adUnitAction === "exists").length;
+    // ── Step 5: Summary + status update ──
+    const adUnitsCreated = results.filter((r) => r.adUnitAction === "created" || r.adUnitAction === "would_create").length;
+    const adUnitsExisted = results.filter((r) => r.adUnitAction === "exists").length;
     const csCreated = results.reduce(
-      (sum, r) => sum + r.csActions.filter((c) => c.action === "created").length,
+      (sum, r) => sum + r.csActions.filter((c) => c.action === "created" || c.action === "would_create").length,
+      0
+    );
+    const csExisted = results.reduce(
+      (sum, r) => sum + r.csActions.filter((c) => c.action === "exists").length,
       0
     );
 
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
     const statusText = dryRun
-      ? `🧪 ${now} — Dry run: ${toProcess.length} placements, ${created} would create`
-      : `📥 ${now} — ${created} ad units created, ${existed} existed, ${csCreated} CS created`;
+      ? `🧪 ${now} — Dry run: ${toProcess.length} placements found`
+      : `📥 ${now} — ${adUnitsCreated} ad units created, ${adUnitsExisted} existed, ${csCreated} CS created`;
 
     if (!dryRun) {
       await updatePublisherStatus(publisherId, statusText);
@@ -346,18 +283,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       publisherName,
       adformPublisherId,
       dryRun,
-      totalAdformPlacements: placements.length,
+      totalAdformPlacements: allPlacements.length,
       processed: results.length,
-      adUnitsCreated: created,
-      adUnitsExisted: existed,
+      adUnitsCreated,
+      adUnitsExisted,
       csCreated,
+      csExisted,
       results,
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
     console.error("[FetchAdUnits] Fatal error:", err);
-    return res
-      .status(500)
-      .json({ error: err.message || "Internal server error" });
+    return res.status(500).json({ error: err.message || "Internal server error" });
   }
 }

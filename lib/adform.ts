@@ -154,28 +154,28 @@ export async function getInventorySources(token: string): Promise<any[]> {
   }, "GET inventory-sources");
 }
 
-// ── GET all placements for an inventory source (publisher) ──
-export async function getInventorySourcePlacements(
+// ── GET all placements for a publisher ──
+export async function getPublisherPlacements(
   token: string,
-  inventorySourceId: string
+  publisherId: string
 ): Promise<any[]> {
   return withRetry(async () => {
     const resp = await fetch(
-      `${API_BASE}/inventory-sources/${inventorySourceId}/placements`,
+      `${API_BASE}/placements?publisherIds=${publisherId}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
     if (!resp.ok) {
       const text = await resp.text();
       const err: any = new Error(
-        `Adform GET inventory-source ${inventorySourceId} placements failed ${resp.status}: ${text}`
+        `Adform GET placements for publisher ${publisherId} failed ${resp.status}: ${text}`
       );
       err.status = resp.status;
       throw err;
     }
 
     return resp.json() as Promise<any[]>;
-  }, `GET inventory-source ${inventorySourceId} placements`);
+  }, `GET placements for publisher ${publisherId}`);
 }
 
 // ── PUT an updated deal ──
