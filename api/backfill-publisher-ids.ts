@@ -12,20 +12,21 @@ const API_BASE = "https://api.adform.com/v1/seller";
  * GET /api/backfill-publisher-ids
  *
  * For each Monday publisher that has ad units but no Adform publisher ID:
- * 1. Take the first ad unit's Adform placement ID
- * 2. GET /v1/seller/placements/{id} → extract publisherId
- * 3. Write that ID to numeric_mm1hsqn1 on the publisher board
- *
- * The placement detail endpoint returns: { id, publisherId, name, type, status, creativeSettings }
+ * 1. Take up to 3 ad units' Adform placement IDs
+ * 2. GET /v1/seller/placements/{id} for each → extract publisherId
+ * 3. If ALL placements agree on the same publisherId → write it
+ * 4. If they DISAGREE → flag as conflict (don't write)
  *
  * Query params:
  *   dryRun=true   — show what would be filled, don't write
- *   limit=10      — process only N publishers (default: all)
+ *   limit=10      — process only N publishers
+ *   write=true    — actually write to Monday (requires dryRun=false)
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const dryRun = req.query.dryRun === "true";
+    const dryRun = req.query.dryRun !== "false"; // default to dry run for safety
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : null;
+    const CHECK_COUNT = 3; // check up to 3 ad units per publisher
 
     console.log(`[Backfill] Starting | dryRun=${dryRun} | limit=${limit}`);
 
@@ -46,77 +47,92 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Step 2: Authenticate with Adform
     const token = await authenticate();
 
-    // Step 3: For each publisher, get first ad unit → placement → publisherId
+    // Step 3: For each publisher, check multiple ad units
     const results: {
       publisherName: string;
-      publisherId: string;
+      mondayId: string;
       adformPubId: string | null;
-      placementUsed: string;
+      adformPubIds: string[]; // all unique IDs found across ad units
+      placementsChecked: { placementId: string; adformPubId: string; placementName: string }[];
+      adUnitCount: number;
       status: string;
     }[] = [];
 
-    // Process in batches of 5
-    const BATCH_SIZE = 5;
+    // Track which Adform publisher IDs are claimed by which Monday publishers
+    const adformIdToMonday = new Map<string, string[]>();
+
+    // Process in batches of 3 (fewer since each publisher checks multiple placements)
+    const BATCH_SIZE = 3;
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
       const batch = toProcess.slice(i, i + BATCH_SIZE);
 
       const batchResults = await Promise.allSettled(
         batch.map(async (pub) => {
-          // Get first ad unit's Adform placement ID from Monday
-          const { adUnits } = await getAdUnits(pub.adUnitIds.slice(0, 1));
+          // Get up to CHECK_COUNT ad units
+          const adUnitIds = pub.adUnitIds.slice(0, CHECK_COUNT);
+          const { adUnits } = await getAdUnits(adUnitIds);
 
-          if (adUnits.length === 0 || !adUnits[0].adformPlacementId) {
+          const withPlacementId = adUnits.filter((au) => au.adformPlacementId);
+          if (withPlacementId.length === 0) {
             return {
               publisherName: pub.name,
-              publisherId: pub.id,
+              mondayId: pub.id,
               adformPubId: null,
-              placementUsed: "none",
-              status: "skipped — no ad unit with Adform placement ID",
+              adformPubIds: [] as string[],
+              placementsChecked: [] as any[],
+              adUnitCount: pub.adUnitIds.length,
+              status: "skipped — no ad units with Adform placement ID",
             };
           }
 
-          const placementId = adUnits[0].adformPlacementId;
+          // Fetch each placement from Adform
+          const placementChecks = await Promise.all(
+            withPlacementId.map(async (au) => {
+              try {
+                const resp = await fetch(`${API_BASE}/placements/${au.adformPlacementId}`, {
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                if (!resp.ok) {
+                  return { placementId: au.adformPlacementId, adformPubId: "error", placementName: au.name };
+                }
+                const data: any = await resp.json();
+                return {
+                  placementId: au.adformPlacementId,
+                  adformPubId: String(data.publisherId || "unknown"),
+                  placementName: data.name || au.name,
+                };
+              } catch {
+                return { placementId: au.adformPlacementId, adformPubId: "error", placementName: au.name };
+              }
+            })
+          );
 
-          // GET placement detail from Adform (includes publisherId)
-          const resp = await fetch(`${API_BASE}/placements/${placementId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
+          // Find unique publisher IDs (excluding errors)
+          const validIds = placementChecks
+            .map((p) => p.adformPubId)
+            .filter((id) => id !== "error" && id !== "unknown");
+          const uniqueIds = [...new Set(validIds)];
 
-          if (!resp.ok) {
-            return {
-              publisherName: pub.name,
-              publisherId: pub.id,
-              adformPubId: null,
-              placementUsed: placementId,
-              status: `skipped — Adform GET placement failed ${resp.status}`,
-            };
-          }
+          let status: string;
+          let adformPubId: string | null = null;
 
-          const placement: any = await resp.json();
-          const adformPubId = placement.publisherId;
-
-          if (!adformPubId) {
-            return {
-              publisherName: pub.name,
-              publisherId: pub.id,
-              adformPubId: null,
-              placementUsed: placementId,
-              status: "skipped — placement has no publisherId",
-            };
-          }
-
-          const adformPubIdStr = String(adformPubId);
-
-          if (!dryRun) {
-            await updatePublisherAdformId(pub.id, adformPubIdStr);
+          if (uniqueIds.length === 0) {
+            status = "skipped — could not determine publisher ID";
+          } else if (uniqueIds.length === 1) {
+            adformPubId = uniqueIds[0];
+            status = dryRun ? "dryRun" : "updated";
+          } else {
+            status = `⚠️ CONFLICT — found multiple Adform publisher IDs: ${uniqueIds.join(", ")}`;
           }
 
           return {
             publisherName: pub.name,
-            publisherId: pub.id,
-            adformPubId: adformPubIdStr,
-            placementUsed: placementId,
-            status: dryRun ? "dryRun" : "updated",
+            mondayId: pub.id,
+            adformPubId,
+            adformPubIds: uniqueIds,
+            placementsChecked: placementChecks,
+            adUnitCount: pub.adUnitIds.length,
+            status,
           };
         })
       );
@@ -125,32 +141,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const r = batchResults[j];
         if (r.status === "fulfilled") {
           results.push(r.value);
+          // Track Adform ID → Monday publisher mapping
+          if (r.value.adformPubId) {
+            const existing = adformIdToMonday.get(r.value.adformPubId) || [];
+            existing.push(r.value.publisherName);
+            adformIdToMonday.set(r.value.adformPubId, existing);
+          }
         } else {
           results.push({
             publisherName: batch[j].name,
-            publisherId: batch[j].id,
+            mondayId: batch[j].id,
             adformPubId: null,
-            placementUsed: "",
+            adformPubIds: [],
+            placementsChecked: [],
+            adUnitCount: batch[j].adUnitIds.length,
             status: `error: ${r.reason?.message || "unknown"}`,
           });
         }
       }
     }
 
-    const updated = results.filter((r) => r.status === "updated" || r.status === "dryRun").length;
+    // Check for duplicates: multiple Monday publishers claiming the same Adform ID
+    const duplicates: { adformPubId: string; publishers: string[] }[] = [];
+    for (const [adId, publishers] of adformIdToMonday) {
+      if (publishers.length > 1) {
+        duplicates.push({ adformPubId: adId, publishers });
+        // Mark these as conflicts
+        for (const r of results) {
+          if (r.adformPubId === adId) {
+            r.status = `⚠️ DUPLICATE — Adform ID ${adId} also claimed by: ${publishers.filter(p => p !== r.publisherName).join(", ")}`;
+          }
+        }
+      }
+    }
+
+    // Step 4: Write to Monday (only clean matches, no conflicts/duplicates)
+    let written = 0;
+    if (!dryRun) {
+      for (const r of results) {
+        if (r.adformPubId && r.status === "updated") {
+          await updatePublisherAdformId(r.mondayId, r.adformPubId);
+          written++;
+        }
+      }
+    }
+
+    const matched = results.filter((r) => r.status === "dryRun" || r.status === "updated").length;
+    const conflicts = results.filter((r) => r.status.includes("CONFLICT") || r.status.includes("DUPLICATE")).length;
     const skipped = results.filter((r) => r.status.startsWith("skipped")).length;
     const errors = results.filter((r) => r.status.startsWith("error")).length;
-
-    console.log(`[Backfill] Done: ${updated} matched, ${skipped} skipped, ${errors} errors`);
 
     return res.status(200).json({
       dryRun,
       mondayPublishers: allPublishers.length,
       needsBackfill: allPublishers.filter((p) => p.adUnitIds.length > 0 && !p.adformPubId).length,
       processed: results.length,
-      matched: updated,
+      matched,
+      conflicts,
       skipped,
       errors,
+      written,
+      duplicates: duplicates.length > 0 ? duplicates : undefined,
       results,
     });
   } catch (err: any) {
