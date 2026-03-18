@@ -245,7 +245,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── 6. Create items on Monday ──
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const created: any[] = [];
+    const skipped: any[] = [];
     const errors: any[] = [];
+    const createdInThisRun = new Set<string>(); // prevent dupes within same run
 
     for (const deal of toImport) {
       const dealId = deal.dealId || String(deal.id);
@@ -253,6 +255,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const cpm = deal.price?.value != null ? String(deal.price.value) : "";
       const pricingType = deal.price?.type || "";
       const agencyIds = (deal.buyers?.agencyIds || []).join(", ");
+
+      // Skip if already created in this run (safety for duplicates in source data)
+      if (createdInThisRun.has(dealId)) {
+        skipped.push({ dealId, name: fullName, reason: "duplicate in batch" });
+        continue;
+      }
 
       // Resolve formats from deal's placements → CS IDs → format IDs
       const formatIdSet = new Set<string>();
@@ -295,7 +303,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           formatIds: formatIds.length > 0 ? formatIds : undefined,
           status: "dryRun",
         });
+        createdInThisRun.add(dealId);
         continue;
+      }
+
+      // Pre-create dedup check: query Monday for this specific deal ID
+      try {
+        const checkQuery = `query {
+          boards(ids: [${MONDAY_BOARD_ID}]) {
+            items_page(limit: 1, query_params: {rules: [{column_id: "${COL_DEAL_ID}", compare_value: ["${dealId}"], operator: any_of}]}) {
+              items { id }
+            }
+          }
+        }`;
+        const checkResp = await fetch("https://api.monday.com/v2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: mondayToken },
+          body: JSON.stringify({ query: checkQuery }),
+        });
+        const checkJson: any = await checkResp.json();
+        const existingItems = checkJson.data?.boards?.[0]?.items_page?.items || [];
+        if (existingItems.length > 0) {
+          console.log(`[ImportDeals] SKIP ${dealId} — already exists as item ${existingItems[0].id}`);
+          skipped.push({ dealId, name: fullName, reason: "already exists", existingItemId: existingItems[0].id });
+          createdInThisRun.add(dealId);
+          continue;
+        }
+      } catch (checkErr: any) {
+        console.warn(`[ImportDeals] Dedup check failed for ${dealId}, proceeding: ${checkErr.message}`);
       }
 
       // Create item on Monday
@@ -336,10 +371,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             formats: formatIds.length,
             status: "created",
           });
+          createdInThisRun.add(dealId);
         }
 
         // Small delay to avoid Monday rate limits
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 300));
       } catch (err: any) {
         console.error(`[ImportDeals] Failed ${dealId}:`, err.message);
         errors.push({ dealId, name: fullName, error: err.message });
@@ -354,9 +390,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       missingFromMonday: missingDeals.length,
       csWithFormats: csToFormats.size,
       imported: created.length,
+      skippedDuplicates: skipped.length > 0 ? skipped.length : undefined,
       errors: errors.length > 0 ? errors : undefined,
       dateCutoff: cutoffStr,
       deals: created,
+      skipped: skipped.length > 0 ? skipped : undefined,
     });
   } catch (err: any) {
     console.error("[ImportDeals] Error:", err);
