@@ -34,28 +34,44 @@ function getToken(): string {
   return token;
 }
 
-async function mondayQuery(query: string, variables?: Record<string, unknown>): Promise<any> {
-  const resp = await fetch(MONDAY_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: getToken(),
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+async function mondayQuery(query: string, variables?: Record<string, unknown>, retries = 2): Promise<any> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(MONDAY_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: getToken(),
+        },
+        body: JSON.stringify({ query, variables }),
+      });
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Monday API ${resp.status}: ${text}`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Monday API ${resp.status}: ${text}`);
+      }
+
+      const json: any = await resp.json();
+
+      if (json.errors && json.errors.length > 0) {
+        throw new Error(`Monday GraphQL error: ${JSON.stringify(json.errors)}`);
+      }
+
+      return json.data;
+    } catch (err: any) {
+      const isRetryable = err?.cause?.code === "ECONNRESET" ||
+        err?.cause?.code === "UND_ERR_SOCKET" ||
+        err?.message?.includes("fetch failed");
+
+      if (isRetryable && attempt < retries) {
+        console.warn(`[Monday] Retry ${attempt + 1}/${retries} after: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const json: any = await resp.json();
-
-  if (json.errors && json.errors.length > 0) {
-    throw new Error(`Monday GraphQL error: ${JSON.stringify(json.errors)}`);
-  }
-
-  return json.data;
+  throw new Error("mondayQuery: unreachable");
 }
 
 // ── Helper: extract linked item IDs from a column value ──
