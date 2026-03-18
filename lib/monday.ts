@@ -592,6 +592,7 @@ export const COLUMNS = {
   ADUNIT_SOURCE: "color_mkqpmnmr",
   ADUNIT_TYPE: "color_mkqp16yy",
   ADUNIT_SIZES: "dropdown_mkqxzvgj",
+  ADUNIT_STATUS: "status",
   CS_ADFORM_ID: COL_CS_ADFORM_ID,
   CS_SIZE: "text_mkvgb9np",
   CS_TYPE: "color_mkvgxw8x",

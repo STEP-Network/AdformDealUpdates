@@ -146,11 +146,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Create the ad unit on Monday
         const columnValues: Record<string, unknown> = {
           [COLUMNS.ADUNIT_ADFORM_PLACEMENT_ID]: String(placementId),
+          [COLUMNS.ADUNIT_SOURCE]: { label: "Adform" },
+          [COLUMNS.ADUNIT_TYPE]: { label: "Ad Unit" },
+          [COLUMNS.ADUNIT_STATUS]: { label: placementStatus === "active" ? "ACTIVE" : "INACTIVE" },
         };
 
         adUnitMondayId = await createItem(
           BOARDS.AD_UNITS,
-          "topics", // default group
+          "group_mkvgv1kg", // "adform ad units" group
           placementName,
           columnValues
         );
