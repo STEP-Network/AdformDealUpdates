@@ -264,7 +264,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           }
         }
       }
-      const formatIds = [...formatIdSet];
+      const formatIds: string[] = [];
+      formatIdSet.forEach((fId) => formatIds.push(fId));
 
       // Build column values
       const columnValues: Record<string, any> = {
