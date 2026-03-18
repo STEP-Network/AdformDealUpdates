@@ -20,11 +20,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
     const contentType = resp.headers.get("content-type") || "";
+    const rawText = await resp.text();
     let body: any;
-    if (contentType.includes("json")) {
-      body = await resp.json();
-    } else {
-      body = await resp.text();
+    try {
+      body = JSON.parse(rawText);
+    } catch {
+      body = rawText || "(empty response)";
     }
 
     return res.status(200).json({
