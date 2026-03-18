@@ -158,20 +158,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           columnValues
         );
 
-        // Link ad unit to publisher
+        // Link ad unit → publisher (two-way relation auto-populates the reverse)
         await updateColumnJson(
           BOARDS.AD_UNITS,
           adUnitMondayId,
           COLUMNS.ADUNIT_PUBLISHER_LINK,
           { item_ids: [parseInt(publisherId, 10)] }
-        );
-
-        // Link publisher to ad unit
-        await updateColumnJson(
-          BOARDS.PUBLISHER,
-          publisherId,
-          COLUMNS.PUBLISHER_AD_UNITS,
-          { item_ids: [parseInt(adUnitMondayId, 10)] }
         );
 
         adUnitAction = "created";
