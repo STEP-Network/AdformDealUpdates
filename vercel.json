@@ -10,6 +10,9 @@
     },
     "api/list-adform-deals.ts": {
       "maxDuration": 300
+    },
+    "api/import-adform-deals.ts": {
+      "maxDuration": 300
     }
   }
 }
