@@ -7,6 +7,9 @@
     },
     "api/fetch-adunits.ts": {
       "maxDuration": 300
+    },
+    "api/list-adform-deals.ts": {
+      "maxDuration": 300
     }
   }
 }
