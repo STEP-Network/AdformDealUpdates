@@ -3,6 +3,7 @@ import {
   getPublisherLinks,
   getAllCreativeSettings,
   getAllAdUnitsForLookup,
+  getFormatNames,
   createItem,
   updateColumnJson,
   updatePublisherStatus,
@@ -10,6 +11,54 @@ import {
   COLUMNS,
 } from "../lib/monday";
 import { authenticate, getPublisherPlacements } from "../lib/adform";
+
+// ── Device-type detection from ad unit (placement) name ──
+type DeviceType = "mobile" | "desktop" | "both";
+
+function getDeviceTypeFromName(name: string): DeviceType {
+  const lower = name.toLowerCase();
+
+  // Mobile ad units: mobile_*, anchor*, interscroller*
+  if (/\bmobile[_\s]/.test(lower) || lower.startsWith("mobile")) return "mobile";
+  if (/\banchor\b/.test(lower) && !/desktop/.test(lower)) return "mobile";
+  if (/\binterscroller\b/.test(lower)) return "mobile";
+
+  // Desktop ad units: billboard_*, sticky_*, rectangle_*
+  if (/\bbillboard[_\s]/.test(lower) || lower.startsWith("billboard")) return "desktop";
+  if (/\bsticky[_\s]/.test(lower) || lower.startsWith("sticky")) return "desktop";
+  if (/\brectangle[_\s]/.test(lower) || lower.startsWith("rectangle")) return "desktop";
+  if (/\boutstream[_\s]/.test(lower) && /desktop/.test(lower)) return "desktop";
+
+  // Explicit desktop/mobile in name
+  if (/\bdesktop\b/.test(lower) && !/\bmobile\b/.test(lower)) return "desktop";
+  if (/\bmobile\b/.test(lower) && !/\bdesktop\b/.test(lower)) return "mobile";
+
+  // Topscroll can be both — or explicit in name
+  if (/\btopscroll\b/.test(lower) || /\bmidscroll\b/.test(lower)) {
+    if (/desktop/.test(lower)) return "desktop";
+    if (/mobile/.test(lower)) return "mobile";
+    return "both";
+  }
+
+  // Default: allow all formats (safe fallback)
+  return "both";
+}
+
+function doesFormatMatchDevice(formatName: string, deviceType: DeviceType): boolean {
+  if (deviceType === "both") return true;
+
+  const lower = formatName.toLowerCase();
+  const isDesktopFormat = /\bdesktop\b/.test(lower);
+  const isMobileFormat = /\bmobile\b/.test(lower);
+
+  // If format name doesn't specify device, allow it (safe fallback)
+  if (!isDesktopFormat && !isMobileFormat) return true;
+
+  if (deviceType === "desktop") return isDesktopFormat;
+  if (deviceType === "mobile") return isMobileFormat;
+
+  return true;
+}
 
 // Column ID for Adform publisher ID on publisher board
 const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
@@ -114,6 +163,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ]);
     console.log(`[FetchAdUnits] Existing: ${existingAdUnits.size} ad units, ${existingCs.size} CS`);
 
+    // ── Step 3b: Pre-collect all format IDs from CS items for batch name lookup ──
+    const allFormatIdsFromCs = new Set<string>();
+    existingCs.forEach((csItem) => {
+      if (csItem.formatIds) {
+        for (const fid of csItem.formatIds) {
+          allFormatIdsFromCs.add(fid);
+        }
+      }
+    });
+    console.log(`[FetchAdUnits] Loading format names for ${allFormatIdsFromCs.size} format IDs...`);
+    const formatNameMap = await getFormatNames(Array.from(allFormatIdsFromCs));
+    console.log(`[FetchAdUnits] Loaded ${formatNameMap.size} format names`);
+
     // ── Step 4: Process each placement ──
     const results: {
       placementName: string;
@@ -121,13 +183,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       status: string;
       adUnitAction: string;
       adUnitMondayId?: string;
+      deviceType?: string;
+      formatsLinked?: number[];
+      formatsSkipped?: string[];
       csActions: { csId: number; name: string; action: string; mondayId?: string }[];
     }[] = [];
 
+    let skippedInactive = 0;
     for (const placement of toProcess) {
       const placementId = placement.id;
       const placementName = placement.name || `placement_${placementId}`;
       const placementStatus = placement.status || "unknown";
+
+      // Skip inactive placements — only create active ad units
+      if (placementStatus !== "active") {
+        skippedInactive++;
+        console.log(`[FetchAdUnits] Skipping inactive placement: ${placementName} (${placementId}) — status: ${placementStatus}`);
+        results.push({
+          placementName,
+          placementId,
+          status: placementStatus,
+          adUnitAction: "skipped_inactive",
+          deviceType: getDeviceTypeFromName(placementName),
+          csActions: [],
+        });
+        continue;
+      }
+
       const csDetails: { id: number; name: string }[] = (placement.creativeSettings || []).map(
         (cs: any) => (typeof cs === "number" ? { id: cs, name: `CS_${cs}` } : cs)
       );
@@ -234,18 +316,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       // Collect format IDs from CS items (each CS on Monday has formats linked)
-      const formatIdSet = new Set<number>();
+      // Then filter by device type so desktop formats don't end up on mobile ad units
+      const deviceType = getDeviceTypeFromName(placementName);
+      const allFormatIds = new Set<number>();
+      const filteredFormatIds = new Set<number>();
+      const skippedFormats: string[] = [];
+
       for (const cs of csDetails) {
         const csIdStr = String(cs.id);
         const existingCsItem = existingCs.get(csIdStr);
         if (existingCsItem && existingCsItem.formatIds) {
           for (const fid of existingCsItem.formatIds) {
-            formatIdSet.add(parseInt(fid, 10));
+            const fidNum = parseInt(fid, 10);
+            allFormatIds.add(fidNum);
+
+            const formatName = formatNameMap.get(fid) || "";
+            if (doesFormatMatchDevice(formatName, deviceType)) {
+              filteredFormatIds.add(fidNum);
+            } else {
+              skippedFormats.push(`${formatName} (${fid})`);
+            }
           }
         }
       }
 
-      // Link CS to ad unit + formats to ad unit
+      if (skippedFormats.length > 0) {
+        console.log(`[FetchAdUnits] ${placementName} (${deviceType}): filtered out ${skippedFormats.length} formats: ${skippedFormats.join(", ")}`);
+      }
+
+      // Link CS to ad unit + filtered formats to ad unit
       if (!dryRun && adUnitMondayId !== "dry-run") {
         if (csMondayIdsForLink.length > 0) {
           await updateColumnJson(
@@ -255,12 +354,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             { item_ids: csMondayIdsForLink }
           );
         }
-        if (formatIdSet.size > 0) {
+        if (filteredFormatIds.size > 0) {
           await updateColumnJson(
             BOARDS.AD_UNITS,
             adUnitMondayId,
             COLUMNS.ADUNIT_FORMATS,
-            { item_ids: Array.from(formatIdSet) }
+            { item_ids: Array.from(filteredFormatIds) }
           );
         }
       }
@@ -271,7 +370,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         status: placementStatus,
         adUnitAction,
         adUnitMondayId,
-        formatsLinked: Array.from(formatIdSet),
+        deviceType,
+        formatsLinked: Array.from(filteredFormatIds),
+        formatsSkipped: skippedFormats,
         csActions,
       });
     }
@@ -290,8 +391,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
     const statusText = dryRun
-      ? `🧪 ${now} — Dry run: ${toProcess.length} placements found`
-      : `📥 ${now} — ${adUnitsCreated} ad units created, ${adUnitsExisted} existed, ${csCreated} CS created`;
+      ? `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`
+      : `📥 ${now} — ${adUnitsCreated} ad units created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
 
     if (!dryRun) {
       await updatePublisherStatus(publisherId, statusText);
@@ -306,6 +407,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       processed: results.length,
       adUnitsCreated,
       adUnitsExisted,
+      skippedInactive,
       csCreated,
       csExisted,
       results,

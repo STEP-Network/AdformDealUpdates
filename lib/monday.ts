@@ -584,6 +584,18 @@ export async function getAllAdUnitsForLookup(): Promise<
   return adUnitMap;
 }
 
+// ── Get format item names by IDs (for device-type filtering) ──
+export async function getFormatNames(formatIds: string[]): Promise<Map<string, string>> {
+  const nameMap = new Map<string, string>();
+  if (formatIds.length === 0) return nameMap;
+
+  const items = await batchFetchItems(formatIds, []);
+  for (const item of items) {
+    nameMap.set(String(item.id), item.name);
+  }
+  return nameMap;
+}
+
 // Board/column IDs exported for use in endpoints
 export const BOARDS = {
   PUBLISHER: PUBLISHER_BOARD,
