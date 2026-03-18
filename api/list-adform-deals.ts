@@ -2,7 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { authenticate } from "../lib/adform";
 
 const API_BASE = "https://api.adform.com/v1/seller";
-const PAGE_SIZE = 5000; // Adform max per request
+const PAGE_SIZE = 100; // Adform returns ~100 per page
 
 /**
  * GET /api/list-adform-deals
@@ -23,13 +23,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const token = await authenticate();
 
-    // ── Fetch ALL deals from Adform using pageSize pagination ──
+    // ── Fetch ALL deals from Adform using page-based pagination ──
+    // API returns ~100 per page, ignores pageSize param
     const allDeals: any[] = [];
     let page = 1;
     let hasMore = true;
+    const seenIds = new Set<number>(); // dedup safety
 
     while (hasMore) {
-      const url = `${API_BASE}/deals?page=${page}&pageSize=${PAGE_SIZE}`;
+      const url = `${API_BASE}/deals?page=${page}`;
       console.log(`[ListDeals] Fetching page ${page}: ${url}`);
 
       const resp = await fetch(url, {
@@ -45,7 +47,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             body: text,
           });
         }
-        // Pagination exhausted
+        // Pagination exhausted (some APIs return 4xx on out-of-range pages)
         console.log(`[ListDeals] Page ${page} failed (${resp.status}), stopping`);
         hasMore = false;
         break;
@@ -61,17 +63,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         break;
       }
 
-      allDeals.push(...deals);
+      // Dedup check: if first deal of this page was already seen, API is cycling
+      if (deals[0]?.id && seenIds.has(deals[0].id)) {
+        console.log(`[ListDeals] Duplicate page detected at page ${page}, stopping`);
+        hasMore = false;
+        break;
+      }
 
-      // If we got fewer than requested, that's the last page
+      for (const d of deals) {
+        if (!seenIds.has(d.id)) {
+          seenIds.add(d.id);
+          allDeals.push(d);
+        }
+      }
+
+      // If we got fewer than typical page size, that's likely the last page
       if (deals.length < PAGE_SIZE) {
         hasMore = false;
       } else {
         page++;
-        // Safety: max 20 pages = 100k deals
-        if (page > 20) hasMore = false;
+        // Safety: max 200 pages = ~20k deals
+        if (page > 200) {
+          console.log(`[ListDeals] Hit 200 page limit, stopping`);
+          hasMore = false;
+        }
       }
     }
+
+    console.log(`[ListDeals] Fetched ${page} pages, ${allDeals.length} unique deals`);
 
     console.log(`[ListDeals] Total deals from Adform: ${allDeals.length}`);
 
