@@ -12,52 +12,103 @@ import {
 } from "../lib/monday";
 import { authenticate, getPublisherPlacements } from "../lib/adform";
 
-// ── Device-type detection from ad unit (placement) name ──
-type DeviceType = "mobile" | "desktop" | "both";
+// ── Format filtering: checks BOTH device type AND format type against ad unit ──
 
-function getDeviceTypeFromName(name: string): DeviceType {
-  const lower = name.toLowerCase();
+/**
+ * Determines if a format is allowed on a given ad unit based on:
+ * 1. Type-specific rules (anchor only on anchor, sticky only on sticky, etc.)
+ * 2. Device matching (desktop formats on desktop ad units, etc.)
+ *
+ * Format → Ad unit rules:
+ *   "Anchor desktop/mobile"      → only on ad units named "anchor"
+ *   "Sticky desktop"             → only on sticky_* ad units
+ *   "Rectangle desktop"          → only on rectangle_* ad units
+ *   "Billboard desktop"          → only on billboard_* ad units
+ *   "Standard mobile"            → only on mobile_* ad units
+ *   "Topscroll desktop/mobile"   → only on topscroll_* ad units
+ *   "Preroll Click-to-play"      → only on *_CTP* / preroll_snvs_ctp ad units
+ *   "Preroll Autoplay"           → only on *_AP / preroll_snvs_ap ad units
+ *   Other formats (Midscroll, Skin/Wallpaper, Native, Outstream, etc.)
+ *     → allowed based on device matching only
+ */
+function isFormatAllowedForAdUnit(formatName: string, adUnitName: string): boolean {
+  const f = formatName.toLowerCase();
+  const a = adUnitName.toLowerCase();
 
-  // Mobile ad units: mobile_*, anchor*, interscroller*
-  if (/\bmobile[_\s]/.test(lower) || lower.startsWith("mobile")) return "mobile";
-  if (/\banchor\b/.test(lower) && !/desktop/.test(lower)) return "mobile";
-  if (/\binterscroller\b/.test(lower)) return "mobile";
+  // ── Type-specific rules (checked first) ──
 
-  // Desktop ad units: billboard_*, sticky_*, rectangle_*
-  if (/\bbillboard[_\s]/.test(lower) || lower.startsWith("billboard")) return "desktop";
-  if (/\bsticky[_\s]/.test(lower) || lower.startsWith("sticky")) return "desktop";
-  if (/\brectangle[_\s]/.test(lower) || lower.startsWith("rectangle")) return "desktop";
-  if (/\boutstream[_\s]/.test(lower) && /desktop/.test(lower)) return "desktop";
-
-  // Explicit desktop/mobile in name
-  if (lower.includes("desktop") && !lower.includes("mobile")) return "desktop";
-  if (lower.includes("mobile") && !lower.includes("desktop")) return "mobile";
-
-  // Topscroll/midscroll can be both — or explicit in name
-  if (lower.includes("topscroll") || lower.includes("midscroll")) {
-    if (lower.includes("desktop")) return "desktop";
-    if (lower.includes("mobile")) return "mobile";
-    return "both";
+  // Anchor formats → only on "anchor" ad units
+  if (f.includes("anchor")) {
+    return a === "anchor" || a.startsWith("anchor_") || a.startsWith("anchor ");
   }
 
-  // Default: allow all formats (safe fallback)
-  return "both";
-}
+  // Sticky format → only on sticky_* ad units
+  if (f.includes("sticky")) {
+    return a.startsWith("sticky");
+  }
 
-function doesFormatMatchDevice(formatName: string, deviceType: DeviceType): boolean {
-  if (deviceType === "both") return true;
+  // Rectangle format → only on rectangle_* ad units
+  if (f.includes("rectangle")) {
+    return a.startsWith("rectangle");
+  }
 
-  const lower = formatName.toLowerCase();
-  const isDesktopFormat = /\bdesktop\b/.test(lower);
-  const isMobileFormat = /\bmobile\b/.test(lower);
+  // Billboard format → only on billboard_* ad units
+  if (f.includes("billboard")) {
+    return a.startsWith("billboard");
+  }
 
-  // If format name doesn't specify device, allow it (safe fallback)
+  // Standard mobile → only on mobile_* ad units
+  if (f.includes("standard") && f.includes("mobile")) {
+    return a.startsWith("mobile");
+  }
+
+  // Topscroll format → only on topscroll_* ad units
+  if (f.includes("topscroll")) {
+    return a.includes("topscroll");
+  }
+
+  // Preroll Click-to-play → only on CTP ad units
+  if (f.includes("click-to-play") || f.includes("click to play")) {
+    return a.includes("ctp");
+  }
+
+  // Preroll Autoplay → only on AP ad units (but not CTP-OTT etc.)
+  if (f.includes("autoplay")) {
+    // Match "_ap" at end, or "sec_ap" pattern, but NOT "ctp"
+    return (a.endsWith("_ap") || a.includes("sec_ap")) && !a.includes("ctp");
+  }
+
+  // ── Device matching fallback for other formats (Midscroll, Skin, Native, Outstream, etc.) ──
+  const isDesktopFormat = f.includes("desktop");
+  const isMobileFormat = f.includes("mobile");
+
+  // Format doesn't specify device → allow it
   if (!isDesktopFormat && !isMobileFormat) return true;
 
-  if (deviceType === "desktop") return isDesktopFormat;
-  if (deviceType === "mobile") return isMobileFormat;
+  // Determine ad unit device type
+  if (a.startsWith("mobile") || a.includes("interscroller")) {
+    return isMobileFormat;
+  }
+  if (a.startsWith("billboard") || a.startsWith("sticky") || a.startsWith("rectangle")) {
+    return isDesktopFormat;
+  }
+  if (a.includes("desktop") && !a.includes("mobile")) return isDesktopFormat;
+  if (a.includes("mobile") && !a.includes("desktop")) return isMobileFormat;
 
+  // Default: allow
   return true;
+}
+
+/** Short device-type label for response output */
+function getDeviceLabel(adUnitName: string): string {
+  const a = adUnitName.toLowerCase();
+  if (a.startsWith("mobile") || a.includes("interscroller")) return "mobile";
+  if (a.startsWith("billboard") || a.startsWith("sticky") || a.startsWith("rectangle")) return "desktop";
+  if (a === "anchor" || a.startsWith("anchor")) return "both";
+  if (a.includes("desktop") && !a.includes("mobile")) return "desktop";
+  if (a.includes("mobile") && !a.includes("desktop")) return "mobile";
+  if (a.includes("ctp") || a.includes("_ap") || a.includes("preroll") || a.includes("snvs")) return "video";
+  return "both";
 }
 
 // Column ID for Adform publisher ID on publisher board
@@ -204,7 +255,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           placementId,
           status: placementStatus,
           adUnitAction: "skipped_inactive",
-          deviceType: getDeviceTypeFromName(placementName),
+          deviceType: getDeviceLabel(placementName),
           csActions: [],
         });
         continue;
@@ -315,9 +366,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
       }
 
-      // Collect format IDs from CS items (each CS on Monday has formats linked)
-      // Then filter by device type so desktop formats don't end up on mobile ad units
-      const deviceType = getDeviceTypeFromName(placementName);
+      // Collect format IDs from CS items, then filter by ad unit type + device
+      const deviceType = getDeviceLabel(placementName);
       const allFormatIds = new Set<number>();
       const filteredFormatIds = new Set<number>();
       const skippedFormats: string[] = [];
@@ -331,7 +381,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             allFormatIds.add(fidNum);
 
             const formatName = formatNameMap.get(fid) || "";
-            if (doesFormatMatchDevice(formatName, deviceType)) {
+            if (isFormatAllowedForAdUnit(formatName, placementName)) {
               filteredFormatIds.add(fidNum);
             } else {
               skippedFormats.push(`${formatName} (${fid})`);
