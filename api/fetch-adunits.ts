@@ -6,7 +6,7 @@ import {
   getFormatNames,
   createItem,
   updateColumnJson,
-  updatePublisherStatus,
+  updatePublisherAdUnitLog,
   BOARDS,
   COLUMNS,
 } from "../lib/monday";
@@ -131,6 +131,8 @@ const COL_PUBLISHER_ADFORM_ID = "text_mm1jgnpe";
  *   maxPlacements=5   — limit placements processed
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  let publisherId: string | undefined;
+
   try {
     // ── Monday webhook challenge ──
     if (req.body?.challenge) {
@@ -138,7 +140,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── Determine publisher ID and options ──
-    let publisherId: string | undefined;
     let dryRun = false;
     let maxPlacements: number | null = null;
 
@@ -440,12 +441,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
-    const statusText = dryRun
+    const logText = dryRun
       ? `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`
-      : `📥 ${now} — ${adUnitsCreated} ad units created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+      : `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
 
     if (!dryRun) {
-      await updatePublisherStatus(publisherId, statusText);
+      await updatePublisherAdUnitLog(publisherId, logText);
     }
 
     return res.status(200).json({
@@ -465,6 +466,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   } catch (err: any) {
     console.error("[FetchAdUnits] Fatal error:", err);
+
+    // Log failure to publisher row if we have a publisherId
+    if (publisherId) {
+      const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+      await updatePublisherAdUnitLog(
+        publisherId,
+        `❌ ${now} — Failed: ${err.message || "Unknown error"}`
+      ).catch(() => {}); // don't throw if logging itself fails
+    }
+
     return res.status(500).json({ error: err.message || "Internal server error" });
   }
 }

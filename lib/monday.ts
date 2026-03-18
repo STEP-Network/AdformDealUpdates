@@ -621,6 +621,34 @@ export const COLUMNS = {
   PUBLISHER_ADFORM_ID: COL_PUBLISHER_ADFORM_ID,
 } as const;
 
+// ── Ad Unit fetch log column on publisher board ──
+const COL_ADUNIT_FETCH_LOG = "text_mm1j5nq1";
+
+// ── Write ad unit fetch log to publisher row ──
+export async function updatePublisherAdUnitLog(publisherId: string, status: string): Promise<void> {
+  try {
+    await mondayQuery(`
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId
+          item_id: $itemId
+          column_id: $columnId
+          value: $value
+        ) {
+          id
+        }
+      }
+    `, {
+      boardId: PUBLISHER_BOARD,
+      itemId: publisherId,
+      columnId: COL_ADUNIT_FETCH_LOG,
+      value: status,
+    });
+  } catch (err) {
+    console.error("Failed to update publisher ad unit log:", err);
+  }
+}
+
 // ── Write sync status to publisher row ──
 export async function updatePublisherStatus(publisherId: string, status: string): Promise<void> {
   try {
