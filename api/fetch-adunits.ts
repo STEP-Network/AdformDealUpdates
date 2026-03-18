@@ -30,13 +30,13 @@ function getDeviceTypeFromName(name: string): DeviceType {
   if (/\boutstream[_\s]/.test(lower) && /desktop/.test(lower)) return "desktop";
 
   // Explicit desktop/mobile in name
-  if (/\bdesktop\b/.test(lower) && !/\bmobile\b/.test(lower)) return "desktop";
-  if (/\bmobile\b/.test(lower) && !/\bdesktop\b/.test(lower)) return "mobile";
+  if (lower.includes("desktop") && !lower.includes("mobile")) return "desktop";
+  if (lower.includes("mobile") && !lower.includes("desktop")) return "mobile";
 
-  // Topscroll can be both — or explicit in name
-  if (/\btopscroll\b/.test(lower) || /\bmidscroll\b/.test(lower)) {
-    if (/desktop/.test(lower)) return "desktop";
-    if (/mobile/.test(lower)) return "mobile";
+  // Topscroll/midscroll can be both — or explicit in name
+  if (lower.includes("topscroll") || lower.includes("midscroll")) {
+    if (lower.includes("desktop")) return "desktop";
+    if (lower.includes("mobile")) return "mobile";
     return "both";
   }
 
