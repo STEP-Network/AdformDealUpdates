@@ -3,7 +3,10 @@
   "outputDirectory": "",
   "functions": {
     "api/sync.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
+    },
+    "api/fetch-adunits.ts": {
+      "maxDuration": 300
     }
   }
 }

@@ -115,4 +115,10 @@ export interface SyncResult {
   maxDeals: number | null;
   deals: DealSyncResult[];
   timestamp: string;
+  // Resilience fields
+  timedOut?: boolean;
+  processedCount?: number;
+  totalCount?: number;
+  nextSkipDeals?: number; // pass as skipDeals to resume where we left off
+  elapsedMs?: number;
 }
