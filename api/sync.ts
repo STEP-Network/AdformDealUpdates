@@ -219,17 +219,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     let statusText: string;
     if (dryRun) {
-      statusText = `🧪 ${now} — Dry run: ${deals.length} deals, ${totalPlacementsAdded} placements would be added (${elapsed}s)`;
+      statusText = `🧪 ${now} — Dry run: ${deals.length} deals, ${totalPlacementsAdded} ad units would be added (${elapsed}s)`;
     } else if (timedOut) {
       const remaining = dealsWithPlacements.length - processedCount;
       const nextSkip = skipDeals + processedCount;
-      statusText = `⏱️ ${now} — ${successCount}/${dealsWithPlacements.length} deals in ${elapsed}s.`;
+      statusText = `⏱️ ${now} — ${successCount}/${dealsWithPlacements.length} deals in ${elapsed}s. +${totalPlacementsAdded} ad units added, ${totalPlacementsMerged} merged.`;
       if (errorCount > 0) statusText += ` ${errorCount} errors.`;
       statusText += ` ${remaining} remain → skipDeals=${nextSkip}`;
     } else if (errorCount === 0) {
-      statusText = `✅ ${now} — ${successCount} deals, +${totalPlacementsAdded} placements, ${totalPlacementsMerged} merged (${elapsed}s)`;
+      statusText = `✅ ${now} — ${successCount} deals, +${totalPlacementsAdded} ad units added, ${totalPlacementsMerged} merged (${elapsed}s)`;
     } else if (successCount > 0) {
-      statusText = `⚠️ ${now} — ${successCount} OK, ${errorCount} failed (${elapsed}s). Errors: ${errorDeals.join("; ")}`;
+      statusText = `⚠️ ${now} — ${successCount} OK, ${errorCount} failed, +${totalPlacementsAdded} ad units added (${elapsed}s). Errors: ${errorDeals.join("; ")}`;
     } else {
       statusText = `❌ ${now} — All ${errorCount} deals failed (${elapsed}s). ${errorDeals[0] || ""}`;
     }

@@ -242,7 +242,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }[] = [];
 
     let skippedInactive = 0;
+    let processedCount = 0;
+    const PROGRESS_INTERVAL = 10;
+
     for (const placement of toProcess) {
+      // Progressive logging
+      processedCount++;
+      if (processedCount % PROGRESS_INTERVAL === 0 && !dryRun) {
+        updatePublisherAdUnitLog(
+          publisherId,
+          `⏳ ${processedCount}/${toProcess.length} placements processed...`
+        ).catch(() => {});
+      }
+
       const placementId = placement.id;
       const placementName = placement.name || `placement_${placementId}`;
       const placementStatus = placement.status || "unknown";
