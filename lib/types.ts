@@ -22,6 +22,7 @@ export interface Deal {
   name: string;
   adformDealId: string;
   formatIds: string[]; // Monday pulse IDs from Formats board
+  statusLabel?: string; // Status column text (e.g. "Deal godkendt", "Needs format/placments")
 }
 
 export interface AdUnit {

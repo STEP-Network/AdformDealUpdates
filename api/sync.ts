@@ -87,6 +87,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const totalDealsOnMonday = deals.length;
     console.log(`[Sync] Fetched ${deals.length} deals`);
 
+    // Filter out deals with excluded statuses (e.g. "Needs format/placments")
+    const EXCLUDED_STATUSES = ["Needs format/placments"];
+    const beforeFilter = deals.length;
+    deals = deals.filter((d) => !d.statusLabel || !EXCLUDED_STATUSES.includes(d.statusLabel));
+    if (beforeFilter !== deals.length) {
+      console.log(`[Sync] Excluded ${beforeFilter - deals.length} deals with status in [${EXCLUDED_STATUSES.join(", ")}], ${deals.length} remaining`);
+    }
+
     // Apply skipDeals + maxDeals limit
     if (skipDeals > 0) {
       deals = deals.slice(skipDeals);

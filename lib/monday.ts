@@ -15,6 +15,7 @@ const COL_PUBLISHER_AD_UNITS = "board_relation_mkvg7sz5";
 // Deal board columns
 const COL_DEAL_ADFORM_ID = "text__1";
 const COL_DEAL_FORMATS = "board_relation_mkyj3jbe";
+const COL_DEAL_STATUS = "color_mkqby95j";
 
 // Ad Unit board columns
 const COL_ADUNIT_ADFORM_PLACEMENT_ID = "text__1";
@@ -182,13 +183,14 @@ export async function getPublisherLinks(publisherId: string): Promise<{
 
 // ── Step 2: Batch fetch all deals with their details + formats ──
 export async function getDeals(dealIds: string[]): Promise<Deal[]> {
-  const items = await batchFetchItems(dealIds, [COL_DEAL_ADFORM_ID, COL_DEAL_FORMATS]);
+  const items = await batchFetchItems(dealIds, [COL_DEAL_ADFORM_ID, COL_DEAL_FORMATS, COL_DEAL_STATUS]);
 
   return items.map((item: any) => ({
     mondayId: String(item.id),
     name: item.name,
     adformDealId: getTextValue(item, COL_DEAL_ADFORM_ID),
     formatIds: getLinkedIds(item, COL_DEAL_FORMATS),
+    statusLabel: getTextValue(item, COL_DEAL_STATUS),
   }));
 }
 
