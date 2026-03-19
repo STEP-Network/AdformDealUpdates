@@ -13,6 +13,9 @@
     },
     "api/import-adform-deals.ts": {
       "maxDuration": 300
+    },
+    "api/sync-deal.ts": {
+      "maxDuration": 300
     }
   }
 }

@@ -16,6 +16,8 @@ const COL_PUBLISHER_AD_UNITS = "board_relation_mkvg7sz5";
 const COL_DEAL_ADFORM_ID = "text__1";
 const COL_DEAL_FORMATS = "board_relation_mkyj3jbe";
 const COL_DEAL_STATUS = "color_mkqby95j";
+const COL_DEAL_PUBLISHERS = "board_relation_mm146gch"; // Site specifik → publishers
+const COL_DEAL_SYNC_LOG = "text_mm1k62gn"; // Deal Sync Log column on deals board
 
 // Ad Unit board columns
 const COL_ADUNIT_ADFORM_PLACEMENT_ID = "text__1";
@@ -664,6 +666,90 @@ export async function updatePublisherAdUnitLog(publisherId: string, status: stri
     });
   } catch (err) {
     console.error("Failed to update publisher ad unit log:", err);
+  }
+}
+
+// ── Fetch a single deal with its linked publishers ──
+export async function getDealWithPublishers(dealId: string): Promise<{
+  deal: Deal;
+  publisherIds: string[];
+  dealName: string;
+}> {
+  const data = await mondayQuery(`
+    query ($itemId: [ID!]!) {
+      items(ids: $itemId) {
+        id
+        name
+        column_values(ids: ["${COL_DEAL_ADFORM_ID}", "${COL_DEAL_FORMATS}", "${COL_DEAL_STATUS}", "${COL_DEAL_PUBLISHERS}"]) {
+          id
+          text
+          ... on BoardRelationValue {
+            linked_item_ids
+          }
+        }
+      }
+    }
+  `, { itemId: [dealId] });
+
+  const item = data?.items?.[0];
+  if (!item) throw new Error(`Deal item ${dealId} not found`);
+
+  return {
+    deal: {
+      mondayId: String(item.id),
+      name: item.name,
+      adformDealId: getTextValue(item, COL_DEAL_ADFORM_ID),
+      formatIds: getLinkedIds(item, COL_DEAL_FORMATS),
+      statusLabel: getTextValue(item, COL_DEAL_STATUS),
+    },
+    publisherIds: getLinkedIds(item, COL_DEAL_PUBLISHERS),
+    dealName: item.name,
+  };
+}
+
+// ── Fetch ad unit IDs for multiple publishers at once ──
+export async function getPublisherAdUnitIds(publisherIds: string[]): Promise<{
+  allAdUnitIds: string[];
+  publisherNames: string[];
+}> {
+  const items = await batchFetchItems(publisherIds, [COL_PUBLISHER_AD_UNITS]);
+  const allIds = new Set<string>();
+  const names: string[] = [];
+
+  for (const item of items) {
+    names.push(item.name);
+    const ids = getLinkedIds(item, COL_PUBLISHER_AD_UNITS);
+    ids.forEach((id: string) => allIds.add(id));
+  }
+
+  const result: string[] = [];
+  allIds.forEach((id) => result.push(id));
+  return { allAdUnitIds: result, publisherNames: names };
+}
+
+// ── Write deal sync log to deal row ──
+export async function updateDealSyncLog(dealId: string, status: string): Promise<void> {
+  try {
+    // Use a text column on the deals board for logging
+    await mondayQuery(`
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId
+          item_id: $itemId
+          column_id: $columnId
+          value: $value
+        ) {
+          id
+        }
+      }
+    `, {
+      boardId: DEALS_BOARD,
+      itemId: dealId,
+      columnId: COL_DEAL_SYNC_LOG,
+      value: status,
+    });
+  } catch (err) {
+    console.error("Failed to update deal sync log:", err);
   }
 }
 
