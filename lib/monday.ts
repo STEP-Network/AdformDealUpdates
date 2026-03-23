@@ -37,7 +37,7 @@ function getToken(): string {
   return token;
 }
 
-async function mondayQuery(query: string, variables?: Record<string, unknown>, retries = 2): Promise<any> {
+async function mondayQuery(query: string, variables?: Record<string, unknown>, retries = 3): Promise<any> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const resp = await fetch(MONDAY_API_URL, {
@@ -48,6 +48,14 @@ async function mondayQuery(query: string, variables?: Record<string, unknown>, r
         },
         body: JSON.stringify({ query, variables }),
       });
+
+      // Rate limited — wait and retry
+      if (resp.status === 429 && attempt < retries) {
+        const retryAfter = parseInt(resp.headers.get("retry-after") || "5", 10);
+        console.warn(`[Monday] Rate limited, waiting ${retryAfter}s (attempt ${attempt + 1}/${retries})`);
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+        continue;
+      }
 
       if (!resp.ok) {
         const text = await resp.text();
@@ -62,13 +70,18 @@ async function mondayQuery(query: string, variables?: Record<string, unknown>, r
 
       return json.data;
     } catch (err: any) {
-      const isRetryable = err?.cause?.code === "ECONNRESET" ||
+      const isRetryable =
+        err?.cause?.code === "ECONNRESET" ||
+        err?.cause?.code === "ETIMEDOUT" ||
         err?.cause?.code === "UND_ERR_SOCKET" ||
-        err?.message?.includes("fetch failed");
+        err?.message?.includes("fetch failed") ||
+        err?.message?.includes("network") ||
+        err?.message?.includes("socket");
 
       if (isRetryable && attempt < retries) {
-        console.warn(`[Monday] Retry ${attempt + 1}/${retries} after: ${err.message}`);
-        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        const delay = 1000 * (attempt + 1);
+        console.warn(`[Monday] Retry ${attempt + 1}/${retries} after ${delay}ms: ${err.message}`);
+        await new Promise((r) => setTimeout(r, delay));
         continue;
       }
       throw err;
