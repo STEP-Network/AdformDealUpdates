@@ -440,7 +440,92 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // ── Step 5: Summary + status update ──
+    // ── Step 5: Auto-deactivate ad units no longer active on Adform ──
+    // Build set of active Adform placement IDs from what we just fetched
+    const activeAdformPlacementIds = new Set<string>();
+    for (const p of allPlacements) {
+      if (p.status === "active") {
+        activeAdformPlacementIds.add(String(p.id));
+      }
+    }
+
+    // Check all existing Monday ad units for this publisher against Adform
+    const deactivated: { mondayId: string; name: string; placementId: string }[] = [];
+    const adUnitEntries: [string, { mondayId: string; name: string; adformPlacementId: string }][] = [];
+    existingAdUnits.forEach((val, key) => adUnitEntries.push([key, val]));
+
+    for (const [placementId, adUnit] of adUnitEntries) {
+      // Only deactivate ad units belonging to this publisher's Adform placements
+      // Check: is this placement ID in our Adform response at all?
+      const inAdform = allPlacements.some((p: any) => String(p.id) === placementId);
+      if (!inAdform) continue; // Not from this publisher, skip
+
+      if (!activeAdformPlacementIds.has(placementId)) {
+        // Placement exists but is not active → deactivate
+        if (!dryRun) {
+          await updateColumnJson(
+            BOARDS.AD_UNITS,
+            adUnit.mondayId,
+            COLUMNS.ADUNIT_STATUS,
+            { index: 0 } // INACTIVE
+          );
+        }
+        deactivated.push({
+          mondayId: adUnit.mondayId,
+          name: adUnit.name,
+          placementId,
+        });
+        console.log(`[FetchAdUnits] Deactivated: ${adUnit.name} (placement ${placementId}) for ${publisherName}`);
+      }
+    }
+
+    // ── Step 6: Find missing formats per ad unit ──
+    // For each active ad unit, check which publisher formats SHOULD be there but aren't
+    // A format is "missing" if isFormatAllowedForAdUnit() says yes, but it's not linked via any CS
+    const missingFormatsReport: {
+      adUnitName: string;
+      adUnitMondayId: string;
+      placementId: number;
+      missingFormats: string[];
+    }[] = [];
+
+    // Collect ALL publisher format names (from the formatNameMap we already loaded)
+    const allPublisherFormatNames: { id: string; name: string }[] = [];
+    formatNameMap.forEach((name, id) => {
+      allPublisherFormatNames.push({ id, name });
+    });
+
+    for (const r of results) {
+      if (r.adUnitAction === "skipped_inactive") continue;
+      if (!r.adUnitMondayId || r.adUnitMondayId === "dry-run") continue;
+
+      // Formats actually linked to this ad unit (from CS)
+      const linkedFormatIds = new Set<string>();
+      if (r.formatsLinked) {
+        for (const fid of r.formatsLinked) {
+          linkedFormatIds.add(String(fid));
+        }
+      }
+
+      // Check each publisher format: should it be on this ad unit?
+      const missing: string[] = [];
+      for (const fmt of allPublisherFormatNames) {
+        if (isFormatAllowedForAdUnit(fmt.name, r.placementName) && !linkedFormatIds.has(fmt.id)) {
+          missing.push(fmt.name);
+        }
+      }
+
+      if (missing.length > 0) {
+        missingFormatsReport.push({
+          adUnitName: r.placementName,
+          adUnitMondayId: r.adUnitMondayId,
+          placementId: r.placementId,
+          missingFormats: missing,
+        });
+      }
+    }
+
+    // ── Step 7: Summary + status update ──
     const adUnitsCreated = results.filter((r) => r.adUnitAction === "created" || r.adUnitAction === "would_create").length;
     const adUnitsExisted = results.filter((r) => r.adUnitAction === "exists").length;
     const csCreated = results.reduce(
@@ -453,9 +538,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
-    const logText = dryRun
-      ? `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`
-      : `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+
+    // Build log text
+    let logText: string;
+    if (dryRun) {
+      logText = `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`;
+    } else {
+      logText = `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+      if (deactivated.length > 0) {
+        const deactNames = deactivated.map((d) => d.name).join(", ");
+        logText += `\n⛔ ${deactivated.length} deactivated on ${publisherName}: ${deactNames}`;
+      }
+      if (missingFormatsReport.length > 0) {
+        logText += `\n⚠️ Missing formats (need CS in Adform):`;
+        for (const entry of missingFormatsReport.slice(0, 10)) {
+          logText += `\n  ${entry.adUnitName}: ${entry.missingFormats.join(", ")}`;
+        }
+        if (missingFormatsReport.length > 10) {
+          logText += `\n  ... +${missingFormatsReport.length - 10} more`;
+        }
+      }
+    }
 
     if (!dryRun) {
       await updatePublisherAdUnitLog(publisherId, logText);
@@ -473,6 +576,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       skippedInactive,
       csCreated,
       csExisted,
+      deactivated: deactivated.length > 0 ? deactivated : undefined,
+      missingFormats: missingFormatsReport.length > 0 ? missingFormatsReport : undefined,
       results,
       timestamp: new Date().toISOString(),
     });
