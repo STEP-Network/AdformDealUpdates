@@ -292,7 +292,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         [COL_DEAL_NAMES]: fullName,
         [COL_CPM]: cpm,
         [COL_PRICING_TYPE]: pricingType,
-        [COL_STATUS]: { index: 3 },           // "Deal godkendt"
+        [COL_STATUS]: { index: 7 },           // "Needs format/placments"
         [COL_SSP]: { index: 107 },            // "Adform"
         [COL_SEATS]: agencyIds ? `Agency ID: ${agencyIds}` : "",
         [COL_ADDED_FROM_ADFORM]: `${now} via API`,
