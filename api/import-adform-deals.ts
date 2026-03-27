@@ -38,14 +38,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ challenge: req.body.challenge });
     }
 
-    // When triggered via Monday button → always live run
-    const isButtonTrigger = req.method === "POST" && req.body?.payload;
-    const dryRun = isButtonTrigger ? false : req.query.dryRun !== "false";
+    // When triggered via POST (Monday button) → always live run
+    const isPostTrigger = req.method === "POST";
+    const dryRun = isPostTrigger ? false : req.query.dryRun !== "false";
     const months = req.query.months ? parseInt(req.query.months as string, 10) : 6;
     const importLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
 
-    if (isButtonTrigger) {
-      console.log("[ImportDeals] Triggered via Monday button");
+    if (isPostTrigger) {
+      console.log("[ImportDeals] Triggered via POST, body keys:", Object.keys(req.body || {}));
     }
 
     const mondayToken = process.env.MONDAY_API_TOKEN;
