@@ -525,7 +525,166 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // ── Step 7: Summary + status update ──
+    // ── Step 7: Auto-link deals to publisher based on shared placements ──
+    // Get this publisher's placements from Monday (board_relation_mkyh83a9)
+    const PUBLISHER_PLACEMENTS_COL = "board_relation_mkyh83a9";
+    const PUBLISHER_DEALS_COL = "board_relation_mm149gqq";
+    const DEAL_PLACEMENTS_COL = "board_relation_mm0ev7qp";
+    const DEALS_BOARD_ID = "1623368485";
+    const PUBLISHER_BOARD_ID = "1222800432";
+
+    let dealsLinked = 0;
+    const dealsLinkedNames: string[] = [];
+
+    if (!dryRun) {
+      try {
+        // 7a. Get publisher's placement item IDs from Monday
+        const pubPlacementsData = await fetch(MONDAY_API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: mondayToken },
+          body: JSON.stringify({
+            query: `query ($id: [ID!]!) {
+              items(ids: $id) {
+                column_values(ids: ["${PUBLISHER_PLACEMENTS_COL}", "${PUBLISHER_DEALS_COL}"]) {
+                  id
+                  ... on BoardRelationValue { linked_item_ids }
+                }
+              }
+            }`,
+            variables: { id: [publisherId] },
+          }),
+        });
+        const pubPlJson: any = await pubPlacementsData.json();
+        const pubCols = pubPlJson.data?.items?.[0]?.column_values || [];
+
+        const publisherPlacementIds = new Set<string>();
+        const existingDealIds = new Set<string>();
+        for (const col of pubCols) {
+          if (col.id === PUBLISHER_PLACEMENTS_COL && col.linked_item_ids) {
+            for (const pid of col.linked_item_ids) publisherPlacementIds.add(String(pid));
+          }
+          if (col.id === PUBLISHER_DEALS_COL && col.linked_item_ids) {
+            for (const did of col.linked_item_ids) existingDealIds.add(String(did));
+          }
+        }
+
+        console.log(`[FetchAdUnits] Publisher has ${publisherPlacementIds.size} placements, ${existingDealIds.size} existing deal links`);
+
+        if (publisherPlacementIds.size > 0) {
+          // 7b. Scan deals board for deals that have any of these placements
+          const matchingDealIds = new Set<string>();
+          const matchingDealNames = new Map<string, string>();
+          let dealCursor: string | null = null;
+
+          do {
+            let query: string;
+            let variables: any = {};
+            if (!dealCursor) {
+              query = `query {
+                boards(ids: [${DEALS_BOARD_ID}]) {
+                  items_page(limit: 500) {
+                    cursor
+                    items {
+                      id
+                      name
+                      column_values(ids: ["${DEAL_PLACEMENTS_COL}"]) {
+                        id
+                        ... on BoardRelationValue { linked_item_ids }
+                      }
+                    }
+                  }
+                }
+              }`;
+            } else {
+              query = `query ($cursor: String!) {
+                next_items_page(cursor: $cursor, limit: 500) {
+                  cursor
+                  items {
+                    id
+                    name
+                    column_values(ids: ["${DEAL_PLACEMENTS_COL}"]) {
+                      id
+                      ... on BoardRelationValue { linked_item_ids }
+                    }
+                  }
+                }
+              }`;
+              variables = { cursor: dealCursor };
+            }
+
+            const dealResp = await fetch(MONDAY_API_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: mondayToken },
+              body: JSON.stringify({ query, variables }),
+            });
+            const dealJson: any = await dealResp.json();
+
+            const pg = dealCursor
+              ? dealJson.data?.next_items_page
+              : dealJson.data?.boards?.[0]?.items_page;
+
+            dealCursor = pg?.cursor || null;
+
+            for (const item of pg?.items || []) {
+              const dealPlacementCol = (item.column_values || []).find(
+                (c: any) => c.id === DEAL_PLACEMENTS_COL
+              );
+              const dealPlacementIds: string[] = dealPlacementCol?.linked_item_ids || [];
+
+              // Check if any of this deal's placements match the publisher's placements
+              for (const dpId of dealPlacementIds) {
+                if (publisherPlacementIds.has(String(dpId))) {
+                  matchingDealIds.add(String(item.id));
+                  matchingDealNames.set(String(item.id), item.name);
+                  break;
+                }
+              }
+            }
+          } while (dealCursor);
+
+          console.log(`[FetchAdUnits] Found ${matchingDealIds.size} deals sharing placements with ${publisherName}`);
+
+          // 7c. Find NEW deals to link (not already linked)
+          const newDealIds: number[] = [];
+          matchingDealIds.forEach((did) => {
+            if (!existingDealIds.has(did)) {
+              newDealIds.push(parseInt(did, 10));
+              dealsLinkedNames.push(matchingDealNames.get(did) || did);
+            }
+          });
+
+          if (newDealIds.length > 0) {
+            // Merge with existing deal links
+            const allDealIds: number[] = [];
+            existingDealIds.forEach((did) => allDealIds.push(parseInt(did, 10)));
+            newDealIds.forEach((did) => allDealIds.push(did));
+
+            await fetch(MONDAY_API_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: mondayToken },
+              body: JSON.stringify({
+                query: `mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+                  change_column_value(board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) { id }
+                }`,
+                variables: {
+                  boardId: PUBLISHER_BOARD_ID,
+                  itemId: publisherId,
+                  columnId: PUBLISHER_DEALS_COL,
+                  value: JSON.stringify({ item_ids: allDealIds }),
+                },
+              }),
+            });
+
+            dealsLinked = newDealIds.length;
+            console.log(`[FetchAdUnits] Linked ${dealsLinked} new deals to ${publisherName}: ${dealsLinkedNames.join(", ")}`);
+          }
+        }
+      } catch (linkErr: any) {
+        console.error(`[FetchAdUnits] Deal linking failed:`, linkErr.message);
+      }
+    }
+
+    // ── Step 8: Summary + status update ──
     const adUnitsCreated = results.filter((r) => r.adUnitAction === "created" || r.adUnitAction === "would_create").length;
     const adUnitsExisted = results.filter((r) => r.adUnitAction === "exists").length;
     const csCreated = results.reduce(
@@ -545,6 +704,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       logText = `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`;
     } else {
       logText = `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+      if (dealsLinked > 0) {
+        logText += `\n🔗 ${dealsLinked} deals linked to ${publisherName}: ${dealsLinkedNames.slice(0, 10).join(", ")}`;
+        if (dealsLinkedNames.length > 10) logText += ` +${dealsLinkedNames.length - 10} more`;
+      }
       if (deactivated.length > 0) {
         const deactNames = deactivated.map((d) => d.name).join(", ");
         logText += `\n⛔ ${deactivated.length} deactivated on ${publisherName}: ${deactNames}`;
@@ -576,6 +739,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       skippedInactive,
       csCreated,
       csExisted,
+      dealsLinked: dealsLinked > 0 ? { count: dealsLinked, names: dealsLinkedNames } : undefined,
       deactivated: deactivated.length > 0 ? deactivated : undefined,
       missingFormats: missingFormatsReport.length > 0 ? missingFormatsReport : undefined,
       results,
