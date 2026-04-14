@@ -234,8 +234,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       statusText = `❌ ${now} — All ${errorCount} deals failed (${elapsed}s). ${errorDeals[0] || ""}`;
     }
 
-    // Await final status write — this one matters
-    await updatePublisherStatus(publisherId, statusText);
+    // Await final status write — this one matters, retry extra hard
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await updatePublisherStatus(publisherId, statusText);
+        break;
+      } catch (writeErr: any) {
+        console.warn(`[Sync] Final status write attempt ${attempt + 1} failed: ${writeErr.message}`);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
 
     // ── Build response ──
     const syncResult: SyncResult = {
