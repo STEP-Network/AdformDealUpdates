@@ -6,6 +6,7 @@ import {
   getFormatNames,
   createItem,
   updateColumnJson,
+  updateColumnValue,
   updatePublisherAdUnitLog,
   BOARDS,
   COLUMNS,
@@ -238,6 +239,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       deviceType?: string;
       formatsLinked?: number[];
       formatsSkipped?: string[];
+      renamedFrom?: string;
       csActions: { csId: number; name: string; action: string; mondayId?: string }[];
     }[] = [];
 
@@ -281,10 +283,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const existing = existingAdUnits.get(String(placementId));
       let adUnitMondayId: string;
       let adUnitAction: string;
+      let renamedFrom: string | undefined;
 
       if (existing) {
         adUnitMondayId = existing.mondayId;
         adUnitAction = "exists";
+
+        // Rename detection: Adform changed the placement name → update Monday item
+        if (existing.name !== placementName && !dryRun) {
+          try {
+            await updateColumnValue(
+              BOARDS.AD_UNITS,
+              adUnitMondayId,
+              "name",
+              placementName
+            );
+            renamedFrom = existing.name;
+            adUnitAction = "renamed";
+            existing.name = placementName; // keep lookup in sync
+            console.log(`[FetchAdUnits] Renamed ad unit ${adUnitMondayId}: "${renamedFrom}" → "${placementName}"`);
+          } catch (renameErr: any) {
+            console.warn(`[FetchAdUnits] Rename failed for ${adUnitMondayId}: ${renameErr.message}`);
+          }
+        }
       } else if (dryRun) {
         adUnitMondayId = "dry-run";
         adUnitAction = "would_create";
@@ -436,6 +457,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         deviceType,
         formatsLinked: Array.from(filteredFormatIds),
         formatsSkipped: skippedFormats,
+        renamedFrom,
         csActions,
       });
     }
@@ -443,25 +465,39 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── Step 5: Auto-deactivate ad units no longer active on Adform ──
     // Build set of active Adform placement IDs from what we just fetched
     const activeAdformPlacementIds = new Set<string>();
+    const allAdformPlacementIds = new Set<string>();
     for (const p of allPlacements) {
+      allAdformPlacementIds.add(String(p.id));
       if (p.status === "active") {
         activeAdformPlacementIds.add(String(p.id));
       }
     }
 
-    // Check all existing Monday ad units for this publisher against Adform
-    const deactivated: { mondayId: string; name: string; placementId: string }[] = [];
+    // Get this publisher's linked ad unit Monday IDs (scope for "gone" deactivation)
+    const { adUnitIds: publisherAdUnitMondayIds } = await getPublisherLinks(publisherId);
+    const publisherAdUnitMondayIdSet = new Set(publisherAdUnitMondayIds.map(String));
+
+    // Check all existing Monday ad units against Adform
+    const deactivated: { mondayId: string; name: string; placementId: string; reason: string }[] = [];
     const adUnitEntries: [string, { mondayId: string; name: string; adformPlacementId: string }][] = [];
     existingAdUnits.forEach((val, key) => adUnitEntries.push([key, val]));
 
     for (const [placementId, adUnit] of adUnitEntries) {
-      // Only deactivate ad units belonging to this publisher's Adform placements
-      // Check: is this placement ID in our Adform response at all?
-      const inAdform = allPlacements.some((p: any) => String(p.id) === placementId);
-      if (!inAdform) continue; // Not from this publisher, skip
+      const inAdform = allAdformPlacementIds.has(placementId);
+      const isActive = activeAdformPlacementIds.has(placementId);
+      const linkedToThisPublisher = publisherAdUnitMondayIdSet.has(adUnit.mondayId);
 
-      if (!activeAdformPlacementIds.has(placementId)) {
-        // Placement exists but is not active → deactivate
+      let reason: string | null = null;
+
+      if (inAdform && !isActive) {
+        // Case 1: Placement exists in Adform but is inactive
+        reason = "inactive in Adform";
+      } else if (!inAdform && linkedToThisPublisher) {
+        // Case 2: Placement is gone from Adform entirely AND ad unit belongs to this publisher
+        reason = "placement removed from Adform";
+      }
+
+      if (reason) {
         if (!dryRun) {
           await updateColumnJson(
             BOARDS.AD_UNITS,
@@ -474,8 +510,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           mondayId: adUnit.mondayId,
           name: adUnit.name,
           placementId,
+          reason,
         });
-        console.log(`[FetchAdUnits] Deactivated: ${adUnit.name} (placement ${placementId}) for ${publisherName}`);
+        console.log(`[FetchAdUnits] Deactivated: ${adUnit.name} (placement ${placementId}) for ${publisherName} — ${reason}`);
       }
     }
 
@@ -703,14 +740,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (dryRun) {
       logText = `🧪 ${now} — Dry run: ${toProcess.length} placements (${skippedInactive} inactive skipped)`;
     } else {
-      logText = `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+      const renamed = results.filter((r) => r.adUnitAction === "renamed");
+      logText = `✅ ${now} — ${adUnitsCreated} created, ${adUnitsExisted} existed, ${renamed.length} renamed, ${skippedInactive} inactive skipped, ${csCreated} CS created`;
+      if (renamed.length > 0) {
+        logText += `\n✏️ Renamed: ${renamed.map((r) => `${r.renamedFrom} → ${r.placementName}`).slice(0, 10).join(", ")}`;
+      }
       if (dealsLinked > 0) {
         logText += `\n🔗 ${dealsLinked} deals linked to ${publisherName}: ${dealsLinkedNames.slice(0, 10).join(", ")}`;
         if (dealsLinkedNames.length > 10) logText += ` +${dealsLinkedNames.length - 10} more`;
       }
       if (deactivated.length > 0) {
-        const deactNames = deactivated.map((d) => d.name).join(", ");
-        logText += `\n⛔ ${deactivated.length} deactivated on ${publisherName}: ${deactNames}`;
+        const deactDetails = deactivated.map((d) => `${d.name} (${d.reason})`).join(", ");
+        logText += `\n⛔ ${deactivated.length} deactivated on ${publisherName}: ${deactDetails}`;
       }
       if (missingFormatsReport.length > 0) {
         logText += `\n⚠️ Missing formats (need CS in Adform):`;
