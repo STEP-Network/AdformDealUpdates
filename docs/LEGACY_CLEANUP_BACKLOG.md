@@ -13,8 +13,12 @@ Each entry: **what to remove**, **trigger condition**, **why we keep it for now*
 **What can be cleaned up when ALL publishers are migrated:**
 
 - **`api/fetch-adunits.ts` — Rename detection block** (lines around the `if (existing.name !== placementName)` check).
-  Once all publishers have run through fetch and renamed their ad units, no Monday ad unit will ever have a name that differs from its Adform placement name. Rename detection becomes dead code.
+  Once all publishers have run through fetch and renamed their 30sec ad units, rename detection becomes dead code.
   → Keep for now: needed to handle each publisher the first time it's synced after the Adform rename.
+
+- **`api/fetch-adunits.ts` — `isLegacy6or20Sec` guard inside the rename block** (skips renaming 6sec/20sec ad units).
+  Only relevant during the consolidation transition; the 6/20sec ad units are being deactivated, not renamed.
+  → Remove together with the rename block once all 30sec ad units are renamed.
 
 - **`api/fetch-adunits.ts` — "placement removed from Adform" deactivation case**.
   Once the 6sec/20sec ad units are all deactivated (or the user deletes them on Monday), this branch will rarely fire. It's still useful in general for any future placement removals though, so consider this **permanent, not legacy**.

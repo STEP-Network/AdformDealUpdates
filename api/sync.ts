@@ -1,13 +1,15 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   getPublisherLinks,
+  getPublisherAdformId,
   getDeals,
   getAdUnits,
   getCreativeSettings,
   attachCreativeSettings,
   updatePublisherStatus,
+  setAdUnitInactive,
 } from "../lib/monday";
-import { authenticate, getDeal, getPlacement, updateDeal } from "../lib/adform";
+import { authenticate, getDeal, getPlacement, getPublisherPlacements, updateDeal } from "../lib/adform";
 import { matchDealsToAdUnits, intersectCreativeSettings } from "../lib/matcher";
 import type { DealSyncResult, SyncResult, AdformDeal, DealWithPlacements, PlacementDetail, CsInfo } from "../lib/types";
 
@@ -108,6 +110,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Step 3: Batch fetch all ad units + their format/CS links
     const { adUnits, csIds, adUnitCsLinks } = await getAdUnits(adUnitIds);
     console.log(`[Sync] Fetched ${adUnits.length} ad units, found ${csIds.length} unique CS references`);
+
+    // Step 3b: Auto-deactivate Monday ad units that are inactive in Adform
+    // (safety net so user doesn't have to press "Synch Adform Placements" first)
+    let preSyncDeactivated: string[] = [];
+    try {
+      const adformPubId = await getPublisherAdformId(publisherId);
+      if (adformPubId) {
+        const token = await authenticate();
+        const adformPlacements = await getPublisherPlacements(token, adformPubId);
+        const activeOnAdform = new Set<string>();
+        const knownOnAdform = new Set<string>();
+        for (const p of adformPlacements) {
+          knownOnAdform.add(String(p.id));
+          if (p.status === "active") activeOnAdform.add(String(p.id));
+        }
+
+        for (const adUnit of adUnits) {
+          if (!adUnit.adformPlacementId) continue;
+          const status = (adUnit.statusLabel || "").toUpperCase();
+          if (status !== "ACTIVE") continue; // already inactive/archived
+
+          // Either inactive on Adform or completely gone (and Adform knew about it)
+          const inAdform = knownOnAdform.has(adUnit.adformPlacementId);
+          const isActive = activeOnAdform.has(adUnit.adformPlacementId);
+
+          if (inAdform && !isActive) {
+            if (!dryRun) await setAdUnitInactive(adUnit.mondayId);
+            adUnit.statusLabel = "INACTIVE"; // update in-memory so matcher skips
+            preSyncDeactivated.push(`${adUnit.name} (${adUnit.adformPlacementId})`);
+          }
+        }
+
+        if (preSyncDeactivated.length > 0) {
+          console.log(`[Sync] Pre-sync deactivated ${preSyncDeactivated.length} ad units: ${preSyncDeactivated.slice(0, 5).join(", ")}`);
+        }
+      }
+    } catch (preErr: any) {
+      console.warn(`[Sync] Pre-sync deactivation check failed (continuing): ${preErr.message}`);
+    }
 
     // Step 4: Batch fetch all creative settings
     const csMap = await getCreativeSettings(csIds);
@@ -232,6 +273,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       statusText = `⚠️ ${now} — ${successCount} OK, ${errorCount} failed, +${totalPlacementsAdded} ad units added (${elapsed}s). Errors: ${errorDeals.join("; ")}`;
     } else {
       statusText = `❌ ${now} — All ${errorCount} deals failed (${elapsed}s). ${errorDeals[0] || ""}`;
+    }
+
+    // Append pre-sync deactivation info if any happened
+    if (preSyncDeactivated.length > 0 && !dryRun) {
+      statusText += `\n⛔ Auto-deactivated ${preSyncDeactivated.length} ad unit(s) inactive on Adform: ${preSyncDeactivated.slice(0, 8).join(", ")}`;
+      if (preSyncDeactivated.length > 8) statusText += ` +${preSyncDeactivated.length - 8} more`;
     }
 
     // Await final status write — this one matters, retry extra hard

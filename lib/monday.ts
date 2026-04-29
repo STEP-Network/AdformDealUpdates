@@ -459,6 +459,23 @@ export async function updatePublisherAdformId(
   await updateColumnValue(PUBLISHER_BOARD, publisherId, COL_PUBLISHER_ADFORM_ID, adformId);
 }
 
+// ── Get a publisher's Adform Publisher ID ──
+export async function getPublisherAdformId(publisherId: string): Promise<string> {
+  const data = await mondayQuery(`
+    query ($id: [ID!]!) {
+      items(ids: $id) {
+        column_values(ids: ["${COL_PUBLISHER_ADFORM_ID}"]) { text }
+      }
+    }
+  `, { id: [publisherId] });
+  return (data.items?.[0]?.column_values?.[0]?.text || "").trim();
+}
+
+// ── Set ad unit status to INACTIVE on Monday (used by deal sync to flip stale ad units) ──
+export async function setAdUnitInactive(adUnitMondayId: string): Promise<void> {
+  await updateColumnJson(AD_UNITS_BOARD, adUnitMondayId, "status", { index: 0 });
+}
+
 // ── Get all CS items from the CS board (for lookup by Adform ID) ──
 export async function getAllCreativeSettings(): Promise<
   Map<string, { mondayId: string; name: string; adformCsId: string; size: string; formatIds: string[] }>

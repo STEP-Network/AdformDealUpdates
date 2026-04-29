@@ -290,7 +290,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         adUnitAction = "exists";
 
         // Rename detection: Adform changed the placement name → update Monday item
-        if (existing.name !== placementName && !dryRun) {
+        // BUT: skip rename for legacy 6sec / 20sec ad units — only 30sec ones are being
+        // consolidated into preroll_snvs_ap / preroll_snvs_ctp. The 6/20sec ad units
+        // are getting deactivated on Adform; their Monday names should stay as-is.
+        const oldNameLower = existing.name.toLowerCase();
+        const isLegacy6or20Sec =
+          oldNameLower.includes("6 sec") ||
+          oldNameLower.includes("6sec") ||
+          oldNameLower.includes("20 sec") ||
+          oldNameLower.includes("20sec");
+
+        if (existing.name !== placementName && !dryRun && !isLegacy6or20Sec) {
           try {
             await updateColumnValue(
               BOARDS.AD_UNITS,
