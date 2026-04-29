@@ -318,30 +318,39 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         continue;
       }
 
-      // Pre-create dedup check: query Monday for this specific deal ID
-      try {
-        const checkQuery = `query {
+      // Reusable function: query Monday for ALL items with this Adform Deal ID
+      // Returns array of item IDs (empty = doesn't exist)
+      const findExistingByDealId = async (id: string): Promise<string[]> => {
+        const q = `query {
           boards(ids: [${MONDAY_BOARD_ID}]) {
-            items_page(limit: 1, query_params: {rules: [{column_id: "${COL_DEAL_ID}", compare_value: ["${dealId}"], operator: any_of}]}) {
+            items_page(limit: 50, query_params: {rules: [{column_id: "${COL_DEAL_ID}", compare_value: ["${id}"], operator: any_of}]}) {
               items { id }
             }
           }
         }`;
-        const checkResp = await fetch("https://api.monday.com/v2", {
+        const r = await fetch("https://api.monday.com/v2", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: mondayToken },
-          body: JSON.stringify({ query: checkQuery }),
+          body: JSON.stringify({ query: q }),
         });
-        const checkJson: any = await checkResp.json();
-        const existingItems = checkJson.data?.boards?.[0]?.items_page?.items || [];
-        if (existingItems.length > 0) {
-          console.log(`[ImportDeals] SKIP ${dealId} — already exists as item ${existingItems[0].id}`);
-          skipped.push({ dealId, name: fullName, reason: "already exists", existingItemId: existingItems[0].id });
+        const j: any = await r.json();
+        const items = j.data?.boards?.[0]?.items_page?.items || [];
+        return items.map((it: any) => String(it.id));
+      };
+
+      // Pre-create dedup check — FAIL-SAFE: skip the deal if check fails
+      try {
+        const existingIds = await findExistingByDealId(dealId);
+        if (existingIds.length > 0) {
+          console.log(`[ImportDeals] SKIP ${dealId} — already exists as item(s) ${existingIds.join(", ")}`);
+          skipped.push({ dealId, name: fullName, reason: "already exists", existingItemId: existingIds[0] });
           createdInThisRun.add(dealId);
           continue;
         }
       } catch (checkErr: any) {
-        console.warn(`[ImportDeals] Dedup check failed for ${dealId}, proceeding: ${checkErr.message}`);
+        console.warn(`[ImportDeals] Dedup check failed for ${dealId}, SKIPPING (fail-safe): ${checkErr.message}`);
+        skipped.push({ dealId, name: fullName, reason: "dedup check failed" });
+        continue;
       }
 
       // Create item on Monday
@@ -375,6 +384,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         } else {
           const newId = result.data?.create_item?.id;
           console.log(`[ImportDeals] Created ${dealId} → Monday item ${newId} (${formatIds.length} formats)`);
+
+          // Post-create dedup verification: race-safe cleanup
+          // If a concurrent run also created this deal, delete the older one
+          try {
+            // Small delay so Monday's index reflects our new item
+            await new Promise((r) => setTimeout(r, 500));
+            const allWithThisId = await findExistingByDealId(dealId);
+            if (allWithThisId.length > 1) {
+              // Keep the one we just created (newId), delete others
+              const toDelete = allWithThisId.filter((iid) => iid !== String(newId));
+              for (const dupId of toDelete) {
+                console.log(`[ImportDeals] Race detected for ${dealId}: deleting duplicate ${dupId}, keeping ${newId}`);
+                await fetch("https://api.monday.com/v2", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Authorization: mondayToken },
+                  body: JSON.stringify({
+                    query: `mutation { delete_item(item_id: ${dupId}) { id } }`,
+                  }),
+                }).catch(() => {});
+              }
+            }
+          } catch (verifyErr: any) {
+            console.warn(`[ImportDeals] Post-create verify failed for ${dealId}: ${verifyErr.message}`);
+          }
+
           created.push({
             dealId,
             name: fullName,
