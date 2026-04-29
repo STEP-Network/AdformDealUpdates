@@ -19,6 +19,10 @@ export function matchDealsToAdUnits(deals: Deal[], adUnits: AdUnit[]): DealWithP
       // Skip ad units with no Adform placement ID
       if (!adUnit.adformPlacementId) continue;
 
+      // Skip INACTIVE / ARCHIVED ad units — they should not be pushed to Adform deals
+      const status = (adUnit.statusLabel || "").toUpperCase();
+      if (status === "INACTIVE" || status === "ARCHIVED") continue;
+
       // Check if ad unit has at least one format matching the deal
       const hasFormatOverlap = adUnit.formatIds.some((fid) => dealFormatSet.has(fid));
       if (!hasFormatOverlap) continue;

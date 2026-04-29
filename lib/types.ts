@@ -31,6 +31,7 @@ export interface AdUnit {
   adformPlacementId: string;
   formatIds: string[]; // Monday pulse IDs from Formats board
   creativeSettings: CreativeSetting[];
+  statusLabel?: string; // "ACTIVE" / "INACTIVE" / "ARCHIVED" — INACTIVE/ARCHIVED skipped in sync
 }
 
 export interface CreativeSetting {

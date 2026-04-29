@@ -221,6 +221,7 @@ export async function getAdUnits(adUnitIds: string[]): Promise<{
     COL_ADUNIT_ADFORM_PLACEMENT_ID,
     COL_ADUNIT_FORMATS,
     COL_ADUNIT_CREATIVE_SETTINGS,
+    "status",
   ]);
 
   const allCsIds = new Set<string>();
@@ -237,6 +238,7 @@ export async function getAdUnits(adUnitIds: string[]): Promise<{
       adformPlacementId: getTextValue(item, COL_ADUNIT_ADFORM_PLACEMENT_ID),
       formatIds: getLinkedIds(item, COL_ADUNIT_FORMATS),
       creativeSettings: [], // filled in after CS batch fetch
+      statusLabel: getTextValue(item, "status"),
     };
   });
 
